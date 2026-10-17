@@ -1,9 +1,29 @@
 from src.constants import *
 from src.load_model import load_model
 from src.video_encoder import encode_video
-from src.helper_functions import ask_video
+from src.inference import ask_video
 from src.plots import plot_attention_grid
+from torch.nn.functional import max_pool2d
+from kvpress import KVSquaredPress
 
+press = KVSquaredPress(
+    compression_ratio=0.9,
+    chunk_size=4096,
+)
+
+# model
+MODEL_NAME = "Qwen/Qwen2.5-VL-3B-Instruct"
+ATTN_IMP = "eager"
+CHUNK_SIZE = 128 # should not go under 16
+
+# video
+VIDEO_FPS = 1.0
+MIN_PIXELS = 256 * 28 * 28
+MAX_PIXELS = 360 * 420
+MAX_NEW_TOKENS = 64
+
+# how many pixel to use for the prefill section of the attention blocks
+# generation is mapped 1:1
 
 model, processor = load_model(
     model_name=MODEL_NAME,
@@ -22,36 +42,19 @@ video_cache = encode_video(
     max_pixels=MAX_PIXELS
 )
 
-# print()
-# print("Video encoding complete.")
-# print("Cached video tokens:", video_embeds.shape[0])
-# print("Embedding dimension:", video_embeds.shape[1])
-# print()
-# print("Saved:", cache_file)
-
-VIDEO_EMBEDS = video_cache["video_embeds"]
-VIDEO_GRID_THW = video_cache["video_grid_thw"]
-SECOND_PER_GRID_TS = video_cache["second_per_grid_ts"]
-
-print("Cached video embedding shape:", VIDEO_EMBEDS.shape)
-print("Video grid:", VIDEO_GRID_THW)
-# prefill
-# compress cache (optional)
-# generate
-
 result = ask_video(
     model=model,
     processor=processor,
     chunk_size=CHUNK_SIZE,
-    attn_implementation=ATTN_IMP,
     video_cache=video_cache,
-    question="What is the person taking from the shelf?",
+    query="What is the person taking from the shelf?",
     max_new_tokens=MAX_NEW_TOKENS,
+    save_attention=(ATTN_IMP == "eager") and True,
+
 )
 
-
 plot_attention_grid(
-    result, # TODO: load attention from src and compress
-    output_file=PLOT_DIR / "question_1_attention.png",
+    data_dir=Path(result["query_dir"]),
+    output_file=PLOT_DIR / f"{result["query_hash"]}_attention.png",
     # max_plot_tokens=1000, # for long videos
 )

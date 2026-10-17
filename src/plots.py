@@ -1,48 +1,12 @@
-import matplotlib as plt
+import matplotlib.pyplot as plt
 import numpy as np
 from pathlib import Path
-
-
-def _build_full_matrix(total_len, prefill_len, prefill_head, head_idx, generation_steps, max_plot_tokens, plot_total_len, plot_prefill_len) :
-    # Full square attention matrix.
-    matrix = np.full(
-        (total_len, total_len),
-        np.nan,
-        dtype=np.float32,
-    )
-
-    # Prefill block
-    matrix[:prefill_len, :prefill_len] = prefill_head
-
-    # Generation rows
-    for step_idx, step_attention in enumerate(generation_steps):
-        row = prefill_len + step_idx
-        values = step_attention[head_idx, 0]
-
-        matrix[row, :len(values)] = values
-
-    # Optional visualization downsampling.
-    if max_plot_tokens is not None and total_len > max_plot_tokens:
-        row_indices = np.linspace(
-            0,
-            total_len - 1,
-            plot_total_len,
-        ).astype(int)
-
-        col_indices = row_indices
-        display_matrix = matrix[np.ix_(row_indices, col_indices)]
-        boundary = plot_prefill_len
-
-    else:
-        display_matrix = matrix
-        boundary = prefill_len
-
-    return display_matrix, boundary
+import torch
 
 
 def _set_labels(ax, display_matrix, cmap, boundary, layer_idx, head_idx, n_layers) :
     im = ax.imshow(
-        display_matrix,
+        display_matrix.detach().cpu().numpy(),
         aspect="auto",
         interpolation="nearest",
         cmap=cmap,
@@ -52,14 +16,14 @@ def _set_labels(ax, display_matrix, cmap, boundary, layer_idx, head_idx, n_layer
 
     # Prefill -> generation boundary.
     ax.axvline(
-        boundary - 0.5,
-        linewidth=1.2,
+        boundary -0.25,
+        linewidth=0.5,
         color="red",
     )
 
     ax.axhline(
-        boundary - 0.5,
-        linewidth=1.2,
+        boundary -0.25,
+        linewidth=0.5,
         color="red",
     )
 
@@ -88,12 +52,8 @@ def _set_labels(ax, display_matrix, cmap, boundary, layer_idx, head_idx, n_layer
 
 
 def plot_attention_grid(
-    prefill_attentions,
-    generation_attentions,
-    prefill_len,
-    n_generated,
-    plot_dir: Path,
-    max_plot_tokens=None,
+    data_dir: Path,
+    output_file: Path,
     cmap="viridis",
     figsize_scale=2.5,
 ):
@@ -111,22 +71,22 @@ def plot_attention_grid(
     context and generated tokens.
     """
 
-    n_layers = len(prefill_attentions)
-    n_heads = prefill_attentions[0].shape[0]
-    total_len = prefill_len + n_generated
+    print("load data")
+    attention_prefill: torch.Tensor = torch.load(data_dir / 'prefill.pt')                 # [L, H, N, N]
+    attention_gen_prefill: torch.Tensor = torch.load(data_dir / 'gen_prefill.pt')         # [L, H, M, N]
+    attention_gen_generation: torch.Tensor = torch.load(data_dir / 'gen_generation.pt')   # [L, H, M, M]
 
-    # Optional downsampling for visualization only.
-    if max_plot_tokens is not None and total_len > max_plot_tokens:
-        scale = max_plot_tokens / total_len
-        plot_prefill_len = max(1, int(prefill_len * scale))
-        plot_total_len = max_plot_tokens
+    n_layers, n_heads, n_gen, n_prefill = attention_gen_prefill.shape
 
-        print(f"downsampling from {total_len} to {plot_total_len}")
-    else:
-        plot_prefill_len = prefill_len
-        plot_total_len = total_len
+    top_right = torch.zeros(n_layers, n_heads, n_prefill, n_gen, device="cpu", dtype=attention_prefill.dtype)
+
+    attentions = torch.cat([
+        torch.cat([attention_prefill, top_right], dim=-1),                      # [L, H, N, N+M]
+        torch.cat([attention_gen_prefill, attention_gen_generation], dim=-1),   # [L, H, M, N+M]
+    ], dim=-2)                                                                  # [L, H, N+M, N+M]
 
     # Figure
+    print("create plot")
     fig, axes = plt.subplots(
         n_layers,
         n_heads,
@@ -137,15 +97,11 @@ def plot_attention_grid(
         squeeze=False,
     )
 
+    print("add matricies")
     for layer_idx in range(n_layers):
-        prefill = prefill_attentions[layer_idx]
-        generation_steps = generation_attentions[layer_idx]
-
         for head_idx in range(n_heads):
-            display_matrix, boundary = _build_full_matrix(total_len, prefill_len, prefill[head_idx], head_idx, generation_steps, max_plot_tokens, plot_total_len, plot_prefill_len)
-
+            display_matrix, boundary = attentions[layer_idx, head_idx, :, :], n_prefill
             ax = axes[layer_idx, head_idx]
-
             _set_labels(ax, display_matrix, cmap, boundary, layer_idx, head_idx, n_layers)
 
     # Global labels
@@ -166,18 +122,11 @@ def plot_attention_grid(
         rect=[0, 0.025, 1, 0.97]
     )
 
-
-    output_file = plot_dir / "attention_grid.png"
-
+    print("save plot")
     fig.savefig(
         output_file,
         dpi=200,
         bbox_inches="tight",
     )
 
-    plt.show()
-
-    print("Saved plot:")
-    print(output_file)
-
-    return output_file
+    # plt.show()

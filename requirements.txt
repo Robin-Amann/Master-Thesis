@@ -2,4 +2,5 @@ numpy==2.2.6
 accelerate
 qwen-vl-utils[decord]
 safetensors
-git+https://github.com/huggingface/transformers.git
+transformers    # git+https://github.com/huggingface/transformers.git
+kvpress

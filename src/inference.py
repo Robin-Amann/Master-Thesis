@@ -1,19 +1,22 @@
 from transformers import Qwen2_5_VLProcessor, Qwen2_5_VLForConditionalGeneration
 import torch
-from torch import device, Tensor
-import numpy as np
+from torch import device
 import gc
 import hashlib
 from pathlib import Path
 
 from src.qwen_utils import to_chat_messages
 from src.constants import ATTENTION_DTYPE, ATTN_DIR
+from src.utils import tensor_size
+
+import logging
+import math
 
 
 def _build_query_inputs(
     model: Qwen2_5_VLForConditionalGeneration, 
     processor: Qwen2_5_VLProcessor,
-    question: str, 
+    query: str, 
     video_cache: dict
 ):
     """
@@ -22,7 +25,7 @@ def _build_query_inputs(
     """
 
     video_token_id = int(model.config.video_token_id)
-    messages = to_chat_messages(text=question)
+    messages = to_chat_messages(text=query)
 
     # Generate the textual chat template without decoding the video.
     chat_text = processor.apply_chat_template(
@@ -62,7 +65,8 @@ def _build_query_inputs(
         else:
             new_ids.append(int(token))
 
-    input_ids = Tensor(
+    torch.Tensor()
+    input_ids = torch.tensor(
         [new_ids],
         dtype=torch.long,
     )
@@ -101,7 +105,7 @@ def _move_inputs_to_lm_device(inputs: dict, lm_device: device):
     for k, v in inputs.items():
         if v is None:
             result[k] = None
-        elif isinstance(v, Tensor):
+        elif isinstance(v, torch.Tensor):
             result[k] = v.to(lm_device)
         else:
             result[k] = v
@@ -111,7 +115,7 @@ def _move_inputs_to_lm_device(inputs: dict, lm_device: device):
 
 def _construct_embeddings(
         model: Qwen2_5_VLForConditionalGeneration, 
-        input_ids: Tensor, 
+        input_ids: torch.Tensor, 
         video_cache: dict,
         lm_device: device,
         inputs: dict
@@ -122,10 +126,10 @@ def _construct_embeddings(
     second_per_grid_ts = inputs["second_per_grid_ts"]
     attention_mask = inputs["attention_mask"]
 
-    text_embeds: Tensor = model.get_input_embeddings()(input_ids)
+    text_embeds: torch.Tensor = model.get_input_embeddings()(input_ids)
 
     # Cached video embeddings -> LM device and dtype.
-    video_embeds: Tensor = video_cache["video_embeds"].to(
+    video_embeds: torch.Tensor = video_cache["video_embeds"].to(
         device=lm_device,
         dtype=text_embeds.dtype,
     )
@@ -157,32 +161,33 @@ def _construct_embeddings(
     return inputs_embeds, position_ids
 
 
-def _save_attention(attentions: list[Tensor], save_dir: Path, filename: str) :
-    for layer_idx, a in enumerate(attentions):
-        layer_chunk_dir = save_dir / f"layer_{layer_idx:02d}"
-        layer_chunk_dir.mkdir(parents=True, exist_ok=True)
-        
-        matrix = a[0].detach().float().cpu().numpy().astype(ATTENTION_DTYPE)
-        np.save(layer_chunk_dir / filename, matrix)
-        del matrix
-
-
 def _prefill(
     chunk_size: int,
     model: Qwen2_5_VLForConditionalGeneration,
-    input_ids: Tensor,
-    inputs_embeds: Tensor,
-    attention_mask: Tensor,
-    position_ids: Tensor,
-    attention_dir: Path # implies that attn_implementation == "eager" and save_attention == True
+    input_ids: torch.Tensor,
+    inputs_embeds: torch.Tensor,
+    attention_mask: torch.Tensor,
+    position_ids: torch.Tensor,
+    attention_dir: Path, # implies that attn_implementation == "eager" and save_attention == True
 ):   
+    logging.info("Prefill...")
     prefill_len = input_ids.shape[1]
+    logging.info(f"Prefill len: {prefill_len}")
+    logging.info(f"Chunk Size: {chunk_size}")
 
     past_key_values = None # kv cache
-    last_logits = None  
+    last_logits = None
+
+    # L x H x px
+    n_layers = model.config.text_config.num_hidden_layers
+    n_heads = model.config.text_config.num_attention_heads
+    n_px = math.ceil(prefill_len/chunk_size)
+    attention = torch.zeros((n_layers, n_heads, n_px, n_px), device="cpu", dtype=torch.float16)
+    logging.info(f"Attention: {attention} [L, H, px, px] {tensor_size(attention)}")
+
     for start_idx in range(0, prefill_len, chunk_size):
         chunk_num = start_idx // chunk_size
-        print(f"Chunk: {chunk_num}")
+        logging.info(f"Chunk: {chunk_num}")
         end_idx = min(start_idx + chunk_size, prefill_len)
 
         chunk_input_ids = input_ids[:, start_idx:end_idx]
@@ -208,13 +213,27 @@ def _prefill(
         #   layers x (batch_size, num_attention_heads, query_length, key_length) 
         #   layers x [1, num_heads, query_length, key_length]
         if attention_dir is not None and outputs.attentions is not None:
-            _save_attention(outputs.attentions, attention_dir, f"prefill_chunk_{chunk_num:04d}.npy")
+            logging.info(f"Chunk Attentions: L x {outputs.attentions[0]} [H, px, px] {tensor_size(outputs.attentions[0], "mb")}")
+            
+            # a: [1, num_heads, query_length, key_length]
+            for layer_idx, a in enumerate(outputs.attentions):
+                matrix = torch.nn.functional.max_pool2d(a[0], kernel_size=chunk_size, stride=chunk_size, ceil_mode=True).squeeze()
+                # matrix: [num_heads, 1, chunk_num+1]
+                attention[layer_idx, :, chunk_num, :chunk_num+1] = matrix.detach().float().cpu()
+                del matrix
 
         # Force free GPU memory of current outputs
         del outputs
+        logging.info(f"Garbage Collection...")
         gc.collect()
         torch.cuda.empty_cache()
 
+    torch.save(attention, attention_dir / "prefill.pt")
+    del attention
+    logging.info(f"Garbage Collection...")
+    gc.collect()
+    torch.cuda.empty_cache()
+        
     # Last prefill logits determine the first generated token.
     next_token_id = torch.argmax(                
         last_logits, # next_token_logits
@@ -226,6 +245,8 @@ def _prefill(
         "past_key_values": past_key_values, # list of tuples of (key, value) for each layer
         "prefill_len": prefill_len, # int
         "new_token_id": next_token_id, # Tensor
+        "prefill_px": n_px,
+        "chunk_size": chunk_size,
     }
 
 
@@ -235,13 +256,24 @@ def _generate(
     prefill_state: dict,
     max_new_tokens: int,
     lm_device: device,
-    attention_dir: Path
+    attention_dir: Path,
 ) :
+
+    n_layers = model.config.text_config.num_hidden_layers
+    n_heads = model.config.text_config.num_attention_heads
+    n_px = prefill_state["prefill_px"]
+    prefill_len = prefill_state["prefill_len"]
+    attention = {
+        "prefill": torch.zeros((n_layers, n_heads, max_new_tokens, n_px), device="cpu", dtype=torch.float16),
+        "generate": torch.zeros((n_layers, n_heads, max_new_tokens, max_new_tokens), device="cpu", dtype=torch.float16)
+    }
+
     generated_ids = []
     eos_token_id = model.config.eos_token_id
     past_key_values = prefill_state["past_key_values"]
     next_token_id = prefill_state["next_token_id"]
     for step in range(max_new_tokens):
+        print(f"generate token {step+1}")
         # next embedding
         token_id = int(next_token_id[0, 0])
         generated_ids.append(token_id)
@@ -252,7 +284,7 @@ def _generate(
         token_embed = model.get_input_embeddings()(next_token_id)
 
         # attention mask
-        current_len = prefill_state["prefill_len"] + len(generated_ids)
+        current_len = prefill_len + len(generated_ids)
         new_attention_mask = torch.ones(
             (1, current_len),
             dtype=torch.long,
@@ -270,8 +302,20 @@ def _generate(
         )
 
         if (attention_dir is not None and outputs.attentions is not None):
-            _save_attention(outputs.attentions, attention_dir, f"generation_step_{step:04d}.npy")
+            # a: [1, num_heads, 1, key_length]
+            for layer_idx, a in enumerate(outputs.attentions):
+                # [num_heads, 1, prefill_len], [num_heads, 1, step+1]
+                prefill, generation = torch.split(a[0], [prefill_len, a.shape[-1] - prefill_len], dim=-1)
 
+                # [num_heads, 1, n_px]
+                prefill_ = torch.nn.functional.max_pool2d(a[0], kernel_size=(1, prefill_state["chunk_size"]), stride=(1, prefill_state["chunk_size"]), ceil_mode=True).squeeze()
+                attention["prefill"][layer_idx, :, step, :] = prefill_.detach().float().cpu()
+                del prefill
+                del prefill_
+
+                attention["generation"][layer_idx, :, step, :step+1] = generation.detach().float().cpu()
+                del generation
+                
         past_key_values = outputs.past_key_values
         next_token_logits = outputs.logits[:, -1, :]
 
@@ -281,10 +325,21 @@ def _generate(
             keepdim=True,
         )
 
-        if (step + 1) % 10 == 0:
-            print(f"  generated {step + 1} tokens")
+        del outputs
+        gc.collect()
+        torch.cuda.empty_cache()
 
-    generated_ids = Tensor(
+    steps = len(generated_ids)
+    attention["prefill"] = attention["prefill"][:, :, :steps, :steps]
+    attention["generation"] = attention["generation"][:, :, :steps, :steps]
+
+    torch.save(attention["prefill"], attention_dir / "gen_prefill.pt")
+    torch.save(attention["generation"], attention_dir / "gen_generation.pt")
+    del attention
+    gc.collect()
+    torch.cuda.empty_cache()
+
+    generated_ids = torch.tensor(
         generated_ids,
         dtype=torch.long,
     )
@@ -307,7 +362,7 @@ def ask_video(
     processor: Qwen2_5_VLProcessor,
     chunk_size: int,
     video_cache: dict,
-    question: str,
+    query: str,
     max_new_tokens: int,
     save_attention=True,
 ):
@@ -321,15 +376,19 @@ def ask_video(
         prefill_attentions (mocked or loaded if needed)
         generation_attentions
     """
-
+    logging.info("Ask Video...")
     lm_device = model.get_input_embeddings().weight.device
+    logging.info(f"lm device: {lm_device}")
 
     # input_ids | attention_mask | mm_token_type_ids | video_grid_thw | (second_per_grid_ts)
 
-    inputs_cpu = _build_query_inputs(model, processor, question, video_cache)
+    inputs_cpu = _build_query_inputs(model, processor, query, video_cache)
     inputs = _move_inputs_to_lm_device(inputs_cpu, lm_device)
 
-    input_ids:  Tensor = inputs["input_ids"]
+    
+    logging.info("Construct Embeddings...")
+    input_ids: torch.Tensor = inputs["input_ids"]
+    logging.info(f"Input IDs: {input_ids} {tensor_size(input_ids)}")
     inputs_embeds, position_ids = _construct_embeddings(
         model=model,
         input_ids=input_ids,
@@ -337,17 +396,18 @@ def ask_video(
         lm_device=lm_device,
         inputs=inputs,
     )
+    logging.info(f"Inputs Embeds: {inputs_embeds} {tensor_size(inputs_embeds)}")
+    logging.info(f"Position Ids: {position_ids} {tensor_size(position_ids)}")
 
     # prepare directories
     if save_attention:
-        query_hash = hashlib.sha1(question.encode("utf-8")).hexdigest()[:12]
+        query_hash = hashlib.sha1(query.encode("utf-8")).hexdigest()[:12]
         query_dir = ATTN_DIR / query_hash
         query_dir.mkdir(parents=True, exist_ok=True)
     else :
         query_dir = None
 
     attention_mask = inputs["attention_mask"]
-
     # past_key_values, prefill_len, new_token_id
     prefill_state = _prefill(
         chunk_size=chunk_size,
@@ -356,7 +416,7 @@ def ask_video(
         inputs_embeds=inputs_embeds,
         attention_mask=attention_mask,
         position_ids=position_ids,
-        attention_dir=query_dir
+        attention_dir=query_dir,
     )
 
     # answer, generated_ids
@@ -366,17 +426,18 @@ def ask_video(
         prefill_state=prefill_state,
         max_new_tokens=max_new_tokens,
         lm_device=lm_device,
-        attention_dir=query_dir
+        attention_dir=query_dir,
     )
 
     result = {
-        "question": question,
+        "query": query,
         **prefill_state,
         "answer": result["answer"],
         "generated_ids": result["generated_ids"],
-
     }
 
     if query_dir is not None:
         result["attention_dtype"] = str(ATTENTION_DTYPE)
+        result["query_dir"] = query_dir.as_posix()
+        result["query_hash"] = query_hash 
 
