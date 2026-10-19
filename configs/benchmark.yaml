@@ -1,0 +1,69 @@
+experiment:
+  name: kv_evtion_baseline
+  seed: 42
+  output_dir: ./outputs/kv_evtion_baseline
+
+model:
+  name: Qwen2_5_Omni_7B
+  checkpoint: Qwen/Qwen2.5-Omni-7B
+  device: cuda
+  precision: float16
+
+datasets:
+  - name: LibriSpeech
+    source:
+      repo: openslr/librispeech_asr
+      split: test
+      config: clean
+    modality: audio
+
+  - name: AI2D
+    source:
+      repo: lmms-lab/ai2d-no-mask
+      split: test
+      config: null
+    modality: image
+
+  - name: LongVideoBench
+    source:
+      repo: longvideobench/LongVideoBench
+      split: test
+      config: null
+    modality: video
+
+  - name: Video-MME-v2
+    source:
+      repo: MME-Benchmarks/Video-MME-v2
+      split: test
+      config: null
+    modality: video_audio
+
+eviction:
+  strategies:
+    - name: StreamingLLM
+    - name: KVzip
+    - name: KeyDiff
+    - name: KVzap
+    - name: KVsquared
+      args:
+        - chunk_size: 4096
+    - name: HybridKV
+    - name: TGV-KV
+
+  ratios:
+    - 0.9
+    - 0.5
+    - 0.2
+    - 0.1
+    - 0.05
+    - 0.02
+
+generation:
+  max_new_tokens: 128
+  do_sample: false
+
+evaluation_metrics:
+  audio: wer
+  image: accuracy
+  video: accuracy
+  video_audio: accuracy

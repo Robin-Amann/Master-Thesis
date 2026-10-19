@@ -70,3 +70,57 @@ def make_random_row_stochastic_tensor(
     x = torch.rand(L, H, M, N, device=device, dtype=dtype)
     x = x / x.sum(dim=-1, keepdim=True)
     return x
+
+
+
+
+
+def to_qwen_chat_messages(video: dict | None = None, text: str = "Describe this video."):
+    content = []
+    if video is None:
+        content.append({
+            "type": "video",
+            "video": "PLACEHOLDER",
+        })
+    else :
+        content.append({
+            "type": "video",
+            "video": f"file://{video['path'].resolve()}",
+            "fps": video["fps"],
+            "max_pixels": video["max_pixels"],
+        })
+
+    content.append({
+        "type": "text",
+        "text": text,
+    })
+
+    return [ {
+        "role": "user",
+        "content": content
+    } ]
+
+
+
+from pathlib import Path
+import yaml
+
+
+def load_config(path: str | Path) -> dict:
+    path = Path(path)
+
+    with path.open("r", encoding="utf-8") as file:
+        config = yaml.safe_load(file)
+
+    if not isinstance(config, dict):
+        raise ValueError("Configuration must be a YAML mapping.")
+
+    return config
+
+
+def save_config(config: dict, output_dir: str):
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    with (output_path / "config.yaml").open("w", encoding="utf-8") as file:
+        yaml.safe_dump(config, file, sort_keys=False,)

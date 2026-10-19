@@ -1,11 +1,10 @@
-from src.constants import *
+from utils.constants import *
 from qwen_vl_utils import process_vision_info
-from src.qwen_utils import to_chat_messages
 import gc
 from transformers import Qwen2_5_VLProcessor, Qwen2_5_VLForConditionalGeneration
 from torch import device, FloatTensor, LongTensor
 import logging
-from src.utils import tensor_size
+from utils.utils import tensor_size, to_qwen_chat_messages
 
 def __encode_video(
     processor: Qwen2_5_VLProcessor, 
@@ -104,7 +103,7 @@ def encode_video(
     VISUAL_DEVICE = next(model.model.visual.parameters()).device
     logging.info(f"Visual Device: {VISUAL_DEVICE}")
 
-    messages = to_chat_messages({'path': video_path, "fps": fps, "max_pixels": max_pixels})
+    messages = to_qwen_chat_messages({'path': video_path, "fps": fps, "max_pixels": max_pixels})
     pixel_values_videos, video_grid_thw, second_per_grid_ts = __encode_video(
         processor, 
         VISUAL_DEVICE,
