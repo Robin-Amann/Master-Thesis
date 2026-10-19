@@ -1,6 +1,25 @@
+# newest transformers version or so:
+# git+https://github.com/huggingface/transformers.git
+
+# decord is for faster video loading. but maybe i can't install it on linux 
+# https://github.com/qwenlm/qwen2.5-omni
+# "If you are not using Linux, you might not be able to install decord from PyPI. In that case, you can ..."
+
+# install requirements by
+# > pip install -r requirements.txt
+
 numpy==2.2.6
+torch
+pydantic
+matplotlib
+
 accelerate
-qwen-vl-utils[decord]
 safetensors
-transformers    # git+https://github.com/huggingface/transformers.git
+
+transformers
+datasets
+
+qwen-vl-utils[decord]
+qwen-omni-utils[decord]
 kvpress
+
