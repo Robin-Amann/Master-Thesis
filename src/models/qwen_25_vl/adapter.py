@@ -7,12 +7,12 @@ from torch import device
 import gc
 import hashlib
 
-from utils.constants import ATTENTION_DTYPE, ATTN_DIR
-from utils.utils import tensor_size
-from .inference import build_query_inputs, construct_embeddings, move_inputs_to_lm_device
+from src.utils.constants import ATTENTION_DTYPE, ATTN_DIR
+from src.utils.utils import tensor_size
+from src.models.qwen_25_vl.inference import build_query_inputs, construct_embeddings, move_inputs_to_lm_device
 import logging
 import math
-from ..shared_logic.load_model import load_model
+from src.models.shared_logic.load_model import load_model
 
 class QwenVLAdapter(ModelAdapter):
 

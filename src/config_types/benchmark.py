@@ -3,8 +3,8 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict
-from .model import ModelConfig
+from pydantic import BaseModel, ConfigDict, Field
+from src.config_types.model import ModelConfig
 from typing import Optional, Any
 
 class ExperimentConfig(BaseModel):
@@ -17,8 +17,8 @@ Modality = Literal["audio", "image", "video", "video_audio"]
 
 class DatasetSourceConfig(BaseModel):
     repo: str
-    config: str | None
     split: str
+    config: str | None
 
 class DatasetConfig(BaseModel):
     name: str
@@ -27,7 +27,7 @@ class DatasetConfig(BaseModel):
 
 class EvictionStrategy(BaseModel) :
     name: str
-    args: Optional[dict[str, Any]]
+    args: dict[str, Any] = Field(default_factory=dict)
 
 class EvictionConfig(BaseModel):
     strategies: list[EvictionStrategy]
@@ -48,7 +48,7 @@ class BenchmarkConfig(BaseModel):
     datasets: list[DatasetConfig]
     eviction: EvictionConfig
     generation: GenerationConfig
-    evaluation_metrics: dict[Modality, str]
+    evaluation_metrics: dict[Modality, str] = Field(default_factory=dict)
 
 
 def load_config(path: str | Path) -> BenchmarkConfig:

@@ -1,7 +1,7 @@
 from transformers import Qwen2_5_VLProcessor, Qwen2_5_VLForConditionalGeneration
 import torch
 from torch import device
-from utils.utils import to_qwen_chat_messages
+from src.utils.utils import to_qwen_chat_messages
 
 
 def build_query_inputs(

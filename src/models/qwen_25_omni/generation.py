@@ -2,19 +2,37 @@ from qwen_omni_utils import process_mm_info
 from transformers import Qwen2_5OmniProcessor
 import torch
 
-def media_encoder(processor: Qwen2_5OmniProcessor, messages, use_audio_in_video=True):
+def media_encoder(
+    processor: Qwen2_5OmniProcessor, 
+    messages: list[dict], 
+    use_audio_in_video: bool = True, 
+    remove_system_message: bool = False
+):
+    # The add_generation_prompt argument is used to add a 
+    # generation prompt, which refers to <|im_start|>assistant\n to the input.
     text = processor.apply_chat_template(
         messages,
         tokenize=False,
         add_generation_prompt=False,
     )
 
+    print(text)
+    # e.g.: text from video + text =
+    # <|im_start|>system
+    # You are a helpful assistant.<|im_end|>
+    # <|im_start|>user
+    # <|vision_bos|><|VIDEO|><|vision_eos|>Question<|im_end|>
+    print(messages, use_audio_in_video)
     audios, images, videos = process_mm_info(
         messages,
         use_audio_in_video=use_audio_in_video,
     )
 
-    return processor(
+    # videos                    batch x [n_samples, n_colors, width*height (resolution)]
+    # print(audios)
+    # print(images)
+            
+    inputs = processor(
         text=[text],
         audio=audios,
         images=images,
@@ -24,15 +42,34 @@ def media_encoder(processor: Qwen2_5OmniProcessor, messages, use_audio_in_video=
         use_audio_in_video=use_audio_in_video,
     )
 
-    # input_ids	                Token IDs representing the formatted conversation.
-    # attention_mask	        Indicates which text tokens are valid and which are padding.
-    # input_features	        Audio features extracted from input audio.
-    # feature_attention_mask    Mask identifying valid audio feature positions.
-    # pixel_values	            Processed image tensors.
-    # image_grid_thw	        Image temporal, height, and width grid metadata.
-    # pixel_values_videos	    Processed video-frame tensors.
-    # video_grid_thw	        Video grid metadata.
-    # video_second_per_grid	    Temporal information used to align video features.
+    if remove_system_message :
+        tokens = processor.tokenizer.convert_ids_to_tokens(inputs["input_ids"].tolist())
+        index = 0
+        while index < len(tokens) - 1 :
+            if tokens[index] == '<|im_start|>' and tokens[index+1] == 'user' :
+                inputs["input_ids"] = inputs["input_ids"][:, index:]
+                inputs["attention_mask"] = inputs["attention_mask"][:, index:]
+
+    return inputs
+
+    # inputs:
+    # input_ids                 [batch, input tokens]   Token IDs representing the formatted conversation.
+    # attention_mask            [batch, input tokens]   Indicates which text tokens are valid and which are padding.
+    # input_features                                    Audio features extracted from input audio.
+    # feature_attention_mask                            Mask identifying valid audio feature positions.
+    # pixel_values                                      Processed image tensors.
+    # image_grid_thw                                    Image temporal, height, and width grid metadata.
+    # pixel_values_videos       [T*H*W, d_token]        Processed video-frame tensors.
+    # video_grid_thw            [T, H, W]               Video grid metadata.
+    # video_second_per_grid	    [T, S]                  Temporal information used to align video features.
+    #  
+    # input tokens = token_video + token_text
+    # token_video = T * H/2 * W/2
+    # d_token = 1176 
+
+    # input ids: (T: some token)
+    # ['<|im_start|>', ..., '<|im_end|>', ..., '<|im_start|>', ..., '<|vision_bos|>', '<|VIDEO|>', ..., '<|VIDEO|>', '<|vision_eos|>', '<|im_end|>', 'Ċ'] 
+    # ['<|im_start|>', ..., '<|im_end|>', ..., '<|im_start|>', ..., '<|vision_bos|>', '<|VIDEO|>', ... (video), '<|VIDEO|>', '<|vision_eos|>', ... (question), '<|im_end|>', 'Ċ']
 
 
 def prefill_validate_inputs(input_ids: torch.Tensor, model_kwargs: dict) :

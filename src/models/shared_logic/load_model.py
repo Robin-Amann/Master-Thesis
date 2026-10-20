@@ -3,13 +3,15 @@ import torch
 
 def load_model(
     model_name: str, 
+    model_class: type[PreTrainedModel], 
     torch_dtype: torch.dtype,
     device: torch.device,
     model_kwargs: dict, 
     processor_kwargs: dict
 ) -> tuple[PreTrainedModel, AutoProcessor]: 
-    
-    model = PreTrainedModel.from_pretrained(
+
+    print(f"load {model_name}")
+    model: PreTrainedModel = model_class.from_pretrained(
         model_name,
         torch_dtype=torch_dtype,
         device_map="auto",

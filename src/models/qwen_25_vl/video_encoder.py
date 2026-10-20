@@ -1,10 +1,10 @@
-from utils.constants import *
+from src.utils.constants import *
 from qwen_vl_utils import process_vision_info
 import gc
 from transformers import Qwen2_5_VLProcessor, Qwen2_5_VLForConditionalGeneration
 from torch import device, FloatTensor, LongTensor
 import logging
-from utils.utils import tensor_size, to_qwen_chat_messages
+from src.utils.utils import tensor_size, to_qwen_chat_messages
 
 def __encode_video(
     processor: Qwen2_5_VLProcessor, 

@@ -4,8 +4,8 @@ experiment:
   output_dir: ./outputs/kv_evtion_baseline
 
 model:
-  name: Qwen2_5_Omni_7B
-  checkpoint: Qwen/Qwen2.5-Omni-7B
+  name: Qwen2_5_Omni
+  checkpoint: Qwen/Qwen2.5-Omni-3B
   device: cuda
   precision: float16
 
@@ -38,15 +38,24 @@ datasets:
       config: null
     modality: video_audio
 
+  - name: MVBench
+    source: 
+      repo: OpenGVLab/MVBench
+      split: train
+      config: action_count
+    modality: video
+
 eviction:
   strategies:
     - name: StreamingLLM
+      args:
+        n_sink: 4
     - name: KVzip
     - name: KeyDiff
     - name: KVzap
     - name: KVsquared
       args:
-        - chunk_size: 4096
+        chunk_size: 4096
     - name: HybridKV
     - name: TGV-KV
 

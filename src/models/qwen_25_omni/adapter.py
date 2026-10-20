@@ -4,9 +4,9 @@ from transformers import DynamicCache, Qwen2_5OmniProcessor, Qwen2_5OmniForCondi
 
 from src.models.model_adapter import ModelAdapter
 from src.config_types.model import ModelConfig
-from .generation import media_encoder, prefill_validate_inputs
-from ..shared_logic.load_model import load_model
-from ..shared_logic.generation import GenerationState, get_eos_token_ids, move_inputs_to_device, get_press_context, decode
+from src.models.qwen_25_omni.generation import media_encoder, prefill_validate_inputs
+from src.models.shared_logic.load_model import load_model
+from src.models.shared_logic.generation import GenerationState, get_eos_token_ids, move_inputs_to_device, get_press_context, decode
 
 
 class QwenOmniAdapter(ModelAdapter):
@@ -15,6 +15,7 @@ class QwenOmniAdapter(ModelAdapter):
         super().__init__(config)
         model, processor = load_model(
             model_name=config.checkpoint, 
+            model_class=Qwen2_5OmniForConditionalGeneration,
             torch_dtype=torch.bfloat16, 
             device=torch.device(config.device),
             model_kwargs={}, 
@@ -23,27 +24,37 @@ class QwenOmniAdapter(ModelAdapter):
         self.hf_model: Qwen2_5OmniForConditionalGeneration = model
         self.hf_processor: Qwen2_5OmniProcessor = processor
 
-    def prepare_inputs(self, entry: dict, use_audio_in_video: bool = True) :
-        if "video_path" in entry :
-            kind, key = "video", "video_path"
-        elif "audio_path" in entry :
-            kind, key = "audio", "audio_path"
-        elif "image_path" in entry :
-            kind, key = "image", "image_path"
-        elif "text" in entry:
-            kind, key = "text", "text"
-        else :
+    def prepare_inputs(
+        self, 
+        entry: dict, 
+        use_image: bool = True, 
+        use_video: bool = True, 
+        use_audio_in_video: bool = True, 
+        use_audio: bool = True, 
+        use_text: bool = True,
+        remove_system_message: bool = False
+    ) :
+        # build messages
+        content = []
+        if "image_path" in entry and use_image:
+            content.append({"type": "image", "image": entry["image_path"]})
+        if "video_path" in entry and use_video:
+            content.append({"type": "video", "video": entry["video_path"]})
+        if "audio_path" in entry and use_audio:
+            content.append({"type": "audio", "audio": entry["audio_path"]})
+        if "text" in entry and use_text:
+            content.append({"type": "text", "text": entry["text"]})
+
+        if len(content) == 0 :
             raise ValueError("no content provided. what now?")
 
         messages = [{
             "role": "user", 
-            "content": [{
-                "type": kind, 
-                kind: entry[key]
-            }]
+            "content": [content]
         }]
 
-        inputs = media_encoder(self.hf_processor, messages, use_audio_in_video and kind == "video")
+        audio_in_video = "video_path" in entry and use_video and use_audio_in_video
+        inputs = media_encoder(self.hf_processor, messages, audio_in_video, remove_system_message)
         return inputs
 
 
@@ -90,9 +101,7 @@ class QwenOmniAdapter(ModelAdapter):
             cache = DynamicCache(config=self.hf_model.config)
             logical_start = 0
             prompt_ids = input_ids
-            generated_ids = []
             eos_token_ids = get_eos_token_ids(self.hf_model)
-            finished = False
         else:
             if state.finished:
                 raise ValueError(
@@ -110,9 +119,10 @@ class QwenOmniAdapter(ModelAdapter):
                 dim=1,
             )
 
-            generated_ids = list(state.generated_ids)
-            eos_token_ids = set(state.eos_token_ids)
-            finished = state.finished
+            if len(state.generated_ids) > 0 :
+                raise ValueError("Model already generated ids. Can't use past state for prefill.")
+                
+            eos_token_ids = state.eos_token_ids
 
         input_length = input_ids.shape[1]
         logical_end = logical_start + input_length
@@ -126,7 +136,7 @@ class QwenOmniAdapter(ModelAdapter):
             logical_end,
             device=input_ids.device,
             dtype=torch.long,
-        )
+        ) # [start, start+1, start+2, ..., end-2, end-1]
 
         # Respect explicitly supplied position_ids. Otherwise, let the
         # model construct model-specific positions where supported.
@@ -139,7 +149,7 @@ class QwenOmniAdapter(ModelAdapter):
             outputs = self.hf_model(
                 **inputs,
                 past_key_values=cache,
-                cache_position=cache_position,
+                cache_position=cache_position, # the logical positions of the new input
                 use_cache=True,
                 return_dict=True,
                 **model_kwargs,
@@ -151,9 +161,9 @@ class QwenOmniAdapter(ModelAdapter):
             next_logits=outputs.logits[:, -1, :],
             logical_length=logical_end,
             prompt_ids=prompt_ids,
-            generated_ids=generated_ids,
+            generated_ids=[],
             eos_token_ids=eos_token_ids,
-            finished=finished,
+            finished=False,
         )
 
 

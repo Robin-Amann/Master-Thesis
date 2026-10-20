@@ -15,11 +15,15 @@ matplotlib
 
 accelerate
 safetensors
+audioread
+torchvision
 
 transformers
 datasets
 
 qwen-vl-utils[decord]
 qwen-omni-utils[decord]
+
+# kvpress needs 'pipes' which is no longer part of the Python standard library (removed in python 3.13) so you have to use python <= 3.12
 kvpress
 

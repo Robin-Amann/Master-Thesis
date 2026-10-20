@@ -1,13 +1,13 @@
 from dataclasses import dataclass
 import torch
-from transformers import PreTrainedModel
+from transformers import PreTrainedModel, DynamicCache
 from typing import Any
 from contextlib import nullcontext
 
 @dataclass
 class GenerationState:
     # KV cache after processing the prompt and generated tokens so far.
-    past_key_values: Any
+    past_key_values: DynamicCache
 
     # Logits predicting the next token.
     next_logits: torch.Tensor

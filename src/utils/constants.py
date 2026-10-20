@@ -15,9 +15,9 @@ VIDEO_CACHE_DIR = WORK_DIR / "video"
 ATTN_DIR = WORK_DIR / "attention"
 
 
-VIDEO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-ATTN_DIR.mkdir(parents=True, exist_ok=True)
-PLOT_DIR.mkdir(parents=True, exist_ok=True)
+# VIDEO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+# ATTN_DIR.mkdir(parents=True, exist_ok=True)
+# PLOT_DIR.mkdir(parents=True, exist_ok=True)
 
 if torch.cuda.is_available() :
     print("GPU:", torch.cuda.get_device_name(0))

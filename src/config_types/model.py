@@ -6,4 +6,4 @@ class ModelConfig(BaseModel):
     name: str
     checkpoint: str
     device: str
-    precision: Literal["float16", "bfloat16", "float32"]
+    precision: Literal["float16", "bfloat16", "float32"] = "float16"
