@@ -1,5 +1,5 @@
 import torch
-from typing import Any, Mapping, Optional
+from typing import Any, Optional
 from transformers import DynamicCache, Qwen2_5OmniProcessor, Qwen2_5OmniForConditionalGeneration
 
 from src.models.model_adapter import ModelAdapter
@@ -7,6 +7,7 @@ from src.config_types.model import ModelConfig
 from src.models.qwen_25_omni.generation import media_encoder, prefill_validate_inputs
 from src.models.shared_logic.load_model import load_model
 from src.models.shared_logic.generation import GenerationState, get_eos_token_ids, move_inputs_to_device, get_press_context, decode
+from src.utils.logger import logger
 
 
 class QwenOmniAdapter(ModelAdapter):
@@ -21,8 +22,10 @@ class QwenOmniAdapter(ModelAdapter):
             model_kwargs={}, 
             processor_kwargs={}
         )
+        # if you use full model instead of only thinker use return_audio=False for generate(...)
         self.hf_model: Qwen2_5OmniForConditionalGeneration = model
         self.hf_processor: Qwen2_5OmniProcessor = processor
+
 
     def prepare_inputs(
         self, 
@@ -39,7 +42,7 @@ class QwenOmniAdapter(ModelAdapter):
         if "image_path" in entry and use_image:
             content.append({"type": "image", "image": entry["image_path"]})
         if "video_path" in entry and use_video:
-            content.append({"type": "video", "video": entry["video_path"]})
+            content.append({"type": "video", "video": entry["video_path"], "fps": 1.0})
         if "audio_path" in entry and use_audio:
             content.append({"type": "audio", "audio": entry["audio_path"]})
         if "text" in entry and use_text:
@@ -50,8 +53,11 @@ class QwenOmniAdapter(ModelAdapter):
 
         messages = [{
             "role": "user", 
-            "content": [content]
+            "content": content
         }]
+
+        logger.info("messages:")
+        logger.info(str(messages))
 
         audio_in_video = "video_path" in entry and use_video and use_audio_in_video
         inputs = media_encoder(self.hf_processor, messages, audio_in_video, remove_system_message)
@@ -63,6 +69,28 @@ class QwenOmniAdapter(ModelAdapter):
         return self.hf_model.device
 
 
+    def get_positions(self, state: GenerationState, input_ids: torch.Tensor) :
+        # indicate the positions of inputs in the sequence
+        # https://huggingface.co/docs/transformers/v4.47.1/kv_cache
+        cache_position = torch.arange(
+            state.context_len,
+            state.context_len + input_ids.shape[1],
+            device=input_ids.device,
+            dtype=torch.long,
+        )
+
+        # token’s position in the list of tokens
+        # https://huggingface.co/docs/transformers/glossary
+        position_ids = torch.arange(
+            state.context_logical_len,
+            state.context_logical_len + input_ids.shape[1],
+            device=input_ids.device,
+            dtype=torch.long,
+        ).unsqueeze(0)
+
+        return cache_position, position_ids
+
+
     @torch.inference_mode()
     def prefill(
         self,
@@ -71,203 +99,105 @@ class QwenOmniAdapter(ModelAdapter):
         press=None,
         model_kwargs: Optional[dict[str, Any]] = None,
     ) -> GenerationState:
-        """
-        Append processor-produced inputs to an optional existing generation
-        state, apply the KV-cache strategy, and return the updated state.
-
-        Args:
-            inputs:
-                Processor output for the NEW input segment only.
-            state:
-                Existing generation state, or None for initial prefill.
-            press:
-                Optional context-manager factory, e.g. press(model).
-            model_kwargs:
-                Additional model arguments. These must not override
-                internally managed cache arguments.
-
-        Returns:
-            A new GenerationState.
-        """
-
         model_kwargs = dict(model_kwargs or {})
         inputs = move_inputs_to_device(inputs, self.device)
         input_ids: torch.Tensor = inputs["input_ids"]
 
         prefill_validate_inputs(input_ids, model_kwargs)
-
-        # Stage 1: establish the previous state and logical offset.
+        
         if state is None:
-            cache = DynamicCache(config=self.hf_model.config)
-            logical_start = 0
-            prompt_ids = input_ids
-            eos_token_ids = get_eos_token_ids(self.hf_model)
-        else:
-            if state.finished:
-                raise ValueError(
-                    "Cannot append prefill inputs to a finished state."
-                )
-
-            cache = state.past_key_values
-            logical_start = state.logical_length
-
-            if state.prompt_ids.shape[0] != input_ids.shape[0]:
-                raise ValueError("Input and state batch sizes must match.")
-
-            prompt_ids = torch.cat(
-                [state.prompt_ids, input_ids],
-                dim=1,
+            state = GenerationState(
+                past_key_values=DynamicCache(config=self.hf_model.config),
+                context_len=0,
+                context_logical_len=0,
+                eos_token_ids=get_eos_token_ids(self.hf_model),
+                finished=False
             )
-
-            if len(state.generated_ids) > 0 :
-                raise ValueError("Model already generated ids. Can't use past state for prefill.")
-                
-            eos_token_ids = state.eos_token_ids
-
-        input_length = input_ids.shape[1]
-        logical_end = logical_start + input_length
-
-        # Stage 2: establish cache positions.
-        # cache_position tracks the logical positions of the new tokens.
-        # This is distinct from the number of KV entries physically
-        # retained after eviction.
-        cache_position = torch.arange(
-            logical_start,
-            logical_end,
-            device=input_ids.device,
-            dtype=torch.long,
-        ) # [start, start+1, start+2, ..., end-2, end-1]
-
-        # Respect explicitly supplied position_ids. Otherwise, let the
-        # model construct model-specific positions where supported.
-        inputs.pop("cache_position", None)
-
-        # Stage 3: append the new inputs and apply the KV strategy.
-        context = get_press_context(press)
-
-        with context(self.hf_model):
-            outputs = self.hf_model(
-                **inputs,
-                past_key_values=cache,
-                cache_position=cache_position, # the logical positions of the new input
-                use_cache=True,
-                return_dict=True,
-                **model_kwargs,
-            )
-
-        # Stage 4: construct the updated generation state.
-        return GenerationState(
-            past_key_values=outputs.past_key_values,
-            next_logits=outputs.logits[:, -1, :],
-            logical_length=logical_end,
-            prompt_ids=prompt_ids,
-            generated_ids=[],
-            eos_token_ids=eos_token_ids,
-            finished=False,
-        )
-
-
-    @torch.inference_mode()
-    def generate(self, state: GenerationState) -> Optional[int]:
-        """Generate one greedy token and advance the KV cache by one position. Alters the state in place"""
-        if state is None:
-            raise RuntimeError("Call prefill() before generate().")
 
         if state.finished:
-            return None
+            raise ValueError("Cannot append prefill inputs to a finished state.")
 
-        # Greedy decoding.
-        token_id = int(state.next_logits.argmax(dim=-1).item())
-        state.generated_ids.append(token_id)
+        # remove kv pairs that are not deemed context
+        if state.context_len < state.past_key_values.get_seq_length() :
+            state.past_key_values.crop(state.context_len)
 
-        if token_id in state.eos_token_ids:
-            state.finished = True
-            return token_id
+        cache_position, position_ids = self.get_positions(state, input_ids)
 
-        token = torch.tensor(
-            [[token_id]],
-            device=self.device,
-            dtype=torch.long,
-        )
+        kwargs = {
+            **inputs,
+            "past_key_values": state.past_key_values, 
+            "cache_position": cache_position, # the logical positions of the new input
+            "position_ids": position_ids,
+            "use_cache": True,
+            "return_dict": True,
+            **model_kwargs,
+        }
 
-        position = torch.tensor(
-            [[state.logical_length]],
-            device=self.device,
-            dtype=torch.long,
-        )
-        cache_position = torch.tensor(
-            [state.logical_length],
-            device=self.device,
-            dtype=torch.long,
-        )
+        # Qwen Omni does implement forward not directly --> thinker does
+        if press is None :
+            outputs = self.hf_model.thinker(**kwargs)
+        else :
+            with press(self.hf_model):
+                outputs = self.hf_model.thinker(**kwargs)
+        # output keys: ['logits', 'past_key_values']
 
-        outputs = self.hf_model(
-            input_ids=token,
-            past_key_values=state.past_key_values,
-            position_ids=position,
-            cache_position=cache_position,
-            use_cache=True,
-            return_dict=True,
-        )
+        state.context_len = outputs.past_key_values.get_seq_length()
+        state.context_logical_len = state.context_logical_len + input_ids.shape[1]
 
-        state.past_key_values = outputs.past_key_values
-        state.next_logits = outputs.logits[:, -1, :]
-        state.logical_length += 1
-
-        return token_id
+        return state
 
 
     @torch.inference_mode()
-    def predict(
+    def generate(
         self,
         state: Optional[GenerationState] = None,
         inputs: Optional[dict[str, Any]] = None,
         max_new_tokens: int = 128, # TODO: constant
-        press=None,
         model_kwargs: Optional[dict[str, Any]] = None,
-        return_state: bool = False,
-    ) -> str | tuple[str, GenerationState]:
-        """
-        Generate a response from an optional existing GenerationState.
+    ) :
 
-                Returns:
-            Generated text, optionally paired with the updated state.
-        """
-        if max_new_tokens < 0:
-            raise ValueError("max_new_tokens must be non-negative.")
-
-        # Resolve the call signature.
-        if state is None and inputs is None :
-            raise ValueError("need to provide past model state or inputs to predict new tokens")
-
-        # Extend the existing prompt/cache before decoding.
-        if inputs is not None:
-            state = self.prefill(
-                inputs=inputs,
-                state=state,
-                press=press,
-                model_kwargs=model_kwargs,
+        if state is None :
+            state = GenerationState(
+                past_key_values=DynamicCache(config=self.hf_model.config),
+                context_len=0,
+                context_logical_len=0,
+                eos_token_ids=get_eos_token_ids(self.hf_model),
+                finished=False
             )
 
-        # Track only tokens generated during this predict() call.
-        start = len(state.generated_ids)
+        inputs = move_inputs_to_device(inputs, self.device)
+        
+        # crop(-100) --> remove last 100 pairs || crop(100) --> only keep first 100
+        state.past_key_values.crop(state.context_len)
+        cache_position, position_ids = self.get_positions(state, inputs["input_ids"])
+        # generate has no parameter "return_dict"
+        logger.info(str(cache_position))
+        logger.info(str(position_ids))
+        text_ids = self.hf_model.generate(
+            **inputs,
+            use_cache=True,
+            past_key_values=state.past_key_values,
+            cache_position=cache_position,
+            position_ids=position_ids,
+            return_audio=False,
+            **(model_kwargs or {})
+        )
 
-        for _ in range(max_new_tokens):
-            if state.finished:
-                break
+        logger.info(f"{state.past_key_values.get_seq_length()}")
 
-            token_id = self.generate(state)
-
-            if token_id is None:
-                break
-
-            if state.finished:
-                break
+        # Qwen returns all tokens so remove input tokens
+        input_length = inputs["input_ids"].shape[1]
+        generated_ids = text_ids[:, input_length:]  # new generated ids
 
 
-        generated_text = decode(self.hf_processor, state, start)
+        text = self.hf_processor.batch_decode(
+            generated_ids,
+            # skip_special_tokens=True,
+            # clean_up_tokenization_spaces=False,
+        )
 
-        if return_state:
-            return generated_text, state
+        return generated_ids, text, state
 
-        return generated_text
+
+# forward returns: ['logits', 'past_key_values', 'rope_deltas']
+# generate returns: text_ids

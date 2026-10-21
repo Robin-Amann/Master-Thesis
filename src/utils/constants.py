@@ -1,6 +1,7 @@
 from pathlib import Path
 import numpy as np
 import torch
+from src.utils.logger import logger
 
 WORK_DIR = Path("/content/qwen_video_cache")
 PLOT_DIR = WORK_DIR / "plots"
@@ -20,6 +21,6 @@ ATTN_DIR = WORK_DIR / "attention"
 # PLOT_DIR.mkdir(parents=True, exist_ok=True)
 
 if torch.cuda.is_available() :
-    print("GPU:", torch.cuda.get_device_name(0))
+    logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
 else :
-    print("CPU")
+    logger.info("CPU")

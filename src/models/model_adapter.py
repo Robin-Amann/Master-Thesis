@@ -4,7 +4,7 @@ from src.config_types.model import ModelConfig
 import torch
 from src.models.shared_logic.generation import GenerationState
 from typing import Optional
-
+from abc import ABC, abstractmethod
 
 class ModelAdapter:
 
@@ -12,7 +12,9 @@ class ModelAdapter:
         super().__init__()
         self.config = config
         self.hf_model: PreTrainedModel = None
+
     
+    @abstractmethod
     def prepare_inputs(        
         self, 
         entry: dict, 
@@ -26,7 +28,9 @@ class ModelAdapter:
         # entry > chat form > processor.apply_chat_template
         raise NotImplementedError()
 
+
     @torch.inference_mode()
+    @abstractmethod
     def prefill( 
         self,
         inputs: dict[str, Any],
@@ -36,11 +40,15 @@ class ModelAdapter:
     ) -> GenerationState: 
         raise NotImplementedError()
 
+
     @torch.inference_mode()
+    @abstractmethod
     def generate(self, state: GenerationState) -> Optional[int]:
         # multiple generate
         raise NotImplementedError()
 
+
+    @abstractmethod
     def predict(
         self,
         state: Optional[GenerationState] = None,

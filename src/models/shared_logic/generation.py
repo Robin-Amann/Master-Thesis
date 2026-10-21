@@ -6,20 +6,15 @@ from contextlib import nullcontext
 
 @dataclass
 class GenerationState:
-    # KV cache after processing the prompt and generated tokens so far.
-    past_key_values: DynamicCache
-
-    # Logits predicting the next token.
-    next_logits: torch.Tensor
-
-    # Number of tokens processed by the model
-    logical_length: int
-
-    prompt_ids: torch.Tensor
-    generated_ids: list[int]
-
-    eos_token_ids: set[int]
-    finished: bool = False
+    past_key_values: DynamicCache       # KV cache after processing the prompt and generated tokens so far.
+    context_len: int                    # number of kv entries that belong to context
+    context_logical_len: int            # actual number of tokens that belong to context (longer than context_len if kv eviction took place)
+    # next_logits: torch.Tensor           # Logits predicting the next token.
+    # logical_length: int                 # Number of tokens processed by the model
+    # prompt_ids: torch.Tensor
+    # generated_ids: list[int]
+    eos_token_ids: set[int]             # tokens that idicate that generation is over
+    finished: bool = False              # is generation with past_key_values over?
 
 
 def decode(processor: Any, state: GenerationState, generated_ids_offset: int = 0) -> str:

@@ -1,6 +1,7 @@
 from qwen_omni_utils import process_mm_info
 from transformers import Qwen2_5OmniProcessor
 import torch
+from src.utils.logger import logger
 
 def media_encoder(
     processor: Qwen2_5OmniProcessor, 
@@ -16,19 +17,28 @@ def media_encoder(
         add_generation_prompt=False,
     )
 
-    print(text)
+    logger.info("\ntext:")
+    logger.info(text)
+
+    if remove_system_message :
+        index = text.find("<|im_start|>user")
+        text = text[index:]
+        logger.info("\ntext without system prompt:")
+        logger.info(text)
+
     # e.g.: text from video + text =
     # <|im_start|>system
     # You are a helpful assistant.<|im_end|>
     # <|im_start|>user
     # <|vision_bos|><|VIDEO|><|vision_eos|>Question<|im_end|>
-    print(messages, use_audio_in_video)
     audios, images, videos = process_mm_info(
         messages,
         use_audio_in_video=use_audio_in_video,
     )
+    if videos is not None :
+        # batch x [n_samples, n_colors, width*height (resolution)]
+        logger.info(f"\nvideos:  {len(videos)} x {videos[0].shape} ([n_samples, n_colors, width, height (resolution)])")
 
-    # videos                    batch x [n_samples, n_colors, width*height (resolution)]
     # print(audios)
     # print(images)
             
@@ -42,14 +52,32 @@ def media_encoder(
         use_audio_in_video=use_audio_in_video,
     )
 
-    if remove_system_message :
-        tokens = processor.tokenizer.convert_ids_to_tokens(inputs["input_ids"].tolist())
-        index = 0
-        while index < len(tokens) - 1 :
-            if tokens[index] == '<|im_start|>' and tokens[index+1] == 'user' :
-                inputs["input_ids"] = inputs["input_ids"][:, index:]
-                inputs["attention_mask"] = inputs["attention_mask"][:, index:]
-
+    # if remove_system_message :
+    #     # print(inputs["input_ids"].shape)
+    #     tokens = processor.tokenizer.convert_ids_to_tokens(inputs["input_ids"][0].tolist())
+    #     logger.info("tokens:")
+    #     logger.info(str(tokens))
+    #     index = 0
+    #     while index < len(tokens) - 1 :
+    #         if tokens[index] == '<|im_start|>' and tokens[index+1] == 'user' :
+    #             logger.info(str(index))
+    #             inputs["input_ids"] = inputs["input_ids"][:, index:]
+    #             inputs["attention_mask"] = inputs["attention_mask"][:, index:]
+    #             logger.info("remaining tokens:")
+    #             logger.info(str(tokens[index:]))
+    #             break
+    #         index += 1
+    #     logger.info("\ntext without system prompt:")
+    #     text = processor.batch_decode(inputs["input_ids"][:, index:])
+    #     logger.info(text[0])
+    logger.info("\ninputs:")
+    logger.info(f"- input_ids:             {inputs["input_ids"].shape}")
+    logger.info(f"- attention_mask:        {inputs["attention_mask"].shape}")
+    if videos is not None :
+        logger.info(f"- pixel_values_videos:   {inputs["pixel_values_videos"].shape}")
+        logger.info(f"- video_grid_thw:        {inputs["video_grid_thw"].shape}")
+        logger.info(f"- video_second_per_grid: {inputs["video_second_per_grid"].shape}")
+        
     return inputs
 
     # inputs:
@@ -60,8 +88,8 @@ def media_encoder(
     # pixel_values                                      Processed image tensors.
     # image_grid_thw                                    Image temporal, height, and width grid metadata.
     # pixel_values_videos       [T*H*W, d_token]        Processed video-frame tensors.
-    # video_grid_thw            [T, H, W]               Video grid metadata.
-    # video_second_per_grid	    [T, S]                  Temporal information used to align video features.
+    # video_grid_thw            [num_videos, 3]         Video grid metadata. 3 --> t, h, w
+    # video_second_per_grid	    [num_videos]            Temporal information used to align video features. Represents how many seconds of video correspond to a single temporal grid unit.
     #  
     # input tokens = token_video + token_text
     # token_video = T * H/2 * W/2

@@ -1,87 +1,89 @@
-
-
-# load data example
-# load model
-# (load eviction strategy)
-# prefill model
-# save state (indices)
-# ask question
-# calculate metric
-
+from src.utils.logger import logger
 from src.data.loader import load_hf_dataset
-from src.config_types.benchmark import load_config
-from src.models.loader import load_model
+from src.config_types.benchmark import load_config, BenchmarkConfig
 from src.procedures.eviction.loader import load_strategy
+from src.models.qwen_25_omni.adapter import QwenOmniAdapter
+import torch
 
 config = load_config("./configs/benchmark.yaml")
 
-# video_audio
-model = load_model(config.model)
-strategy = config.eviction.strategies[0]
-args = strategy.args or {}
-eviction_strategy = load_strategy(strategy.name, args | {"compression_ratio": 0.5} )  
+def load_entry(config: BenchmarkConfig) :
+    source = config.datasets[4].source
 
-source = config.datasets[4].source
-print(source)
-dataset = load_hf_dataset(source, limit=10)
-print(dataset)
-# Dataset({
-#     features: ['video_id', 'url', 'group_type', 'group_structure', 'question_id', 'question', 'options', 'answer', 'level', 'second_head', 'third_head'],
-#     num_rows: 100
-# })
-# dataset = dataset.select_columns(['video_id', 'url', 'question_id', 'question', 'options'])
+    logger.info("data source:")
+    logger.info(source)
+
+    dataset = load_hf_dataset(source, limit=10)
+    logger.info("dataset:")
+    logger.info(dataset)
+
+    base = "/export/data1/ramann/hub/datasets--OpenGVLab--MVBench/snapshots/230a2d4fac8900333c61754641c7a13e069ac9c6/video/perception/videos/"
+    # video_6480.mp4 is 15 sec.
+    logger.info("video base:")
+    logger.info(base)
+
+    dataset = dataset.map(
+        lambda row: {"video_path": base + row["video"], "text": row["question"]},
+        remove_columns=["video", "question"]
+    )
+
+    entry = dataset[0]
+
+    logger.info("\nentry:")
+    logger.info(entry)
+
+    return entry
+
+def load_eviction_strategy(config: BenchmarkConfig) :
+    strategy = config.eviction.strategies[0]
+    args = strategy.args or {}
+    eviction_strategy = load_strategy(strategy.name, args | {"compression_ratio": 0.5} )  
+    return eviction_strategy
 
 
-# for video_id in dataset.unique("video_id"):
-#     video_questions = dataset.filter(
-#         lambda row: row["video_id"] == video_id
-#     )
+model = QwenOmniAdapter(config.model)
+eviction_strategy = load_eviction_strategy(config)
+entry = load_entry(config)
 
-#     video_url = video_questions[0]["url"]
 
-    # media_inputs = model.prepare_inputs(media_entry["media"])
-
-    # for entry in video_questions :
-    #     pass
-
-from datasets import Video
-base = "/export/data1/ramann/hub/datasets--OpenGVLab--MVBench/snapshots/230a2d4fac8900333c61754641c7a13e069ac9c6/video/perception/videos/"
-
-dataset = dataset.cast_column("video", Video(decode=False)).map(
-    lambda row: {"video_path": row["video"]["path"], "text": row["question"]},
-    remove_columns=["video", "question"]
+media_inputs = model.prepare_inputs(
+    entry, 
+    use_audio_in_video=False,
+    use_text=False
 )
 
-entry = dataset[0]
-entry["video_path"] = base + entry["video_path"]
-print(entry)
-media_inputs = model.prepare_inputs(entry, use_audio_in_video=False, use_text=False)
-text_inputs = model.prepare_inputs(entry, use_video=False, remove_system_message=True)
+text_inputs = model.prepare_inputs(
+    entry, 
+    use_video=False,
+    remove_system_message=False
+)
 
-state = model.prefill(inputs=media_inputs, press=eviction_strategy)
-print(state.past_key_values.get_seq_length())
-# generated_text, output_state = model.predict(state=state, inputs=text_inputs, return_state=True)
-# print(output_state.past_key_values.get_seq_length())
-
-
-# print(generated_text)
-# print(output_state)
-
-# 'input_ids':
-# 'attention_mask':
-# 'pixel_values_videos':
-# 'video_grid_thw': tensor([[15, 40, 72]]), 
-# 'video_second_per_grid': tensor([1.])
-
-
-# from huggingface_hub import snapshot_download
-
-# local_dir = snapshot_download(
-#     repo_id="OpenGVLab/MVBench",
-#     repo_type="dataset",
-#     allow_patterns="video/*",
+# inputs = model.prepare_inputs(
+#     entry, 
+#     use_audio_in_video=False,
 # )
+state = model.prefill(inputs=media_inputs)
+logger.info(str([state.past_key_values.get_seq_length(), state.context_len, state.context_logical_len, state.eos_token_ids, state.finished]))
 
-# print(local_dir)
+text_ids, text, state = model.generate(state=state, inputs=text_inputs)
+# text_ids, text, state = model.generate(inputs=inputs)
+
+logger.info(f"text ids {text_ids}, {text_ids.shape}")
+logger.info(f"generated text: {text[0]}")
+logger.info(str([state.past_key_values.get_seq_length(), state.context_len, state.context_logical_len, state.eos_token_ids, state.finished]))
 
 
+# logger.info("\n\n### Prepare media inputs:")
+# media_inputs = model.prepare_inputs(entry, use_audio_in_video=False, use_text=False)
+# logger.info("\n\n### Prepare text inputs:")
+# text_inputs = model.prepare_inputs(entry, use_video=False, remove_system_message=True)
+
+# logger.info("\n\n### Prefill:")
+# state = model.prefill(inputs=media_inputs, press=eviction_strategy)
+# logger.info(f"seq_length: {state.past_key_values.get_seq_length()}")
+
+# logger.info("\n\n### Predict:")
+# generated_text, output_state = model.predict(state=state, inputs=text_inputs, return_state=True)
+# logger.info(f"old seq_length: {state.past_key_values.get_seq_length()}")
+# logger.info(f"new seq_length: {output_state.past_key_values.get_seq_length()}")
+# logger.info(f"generated_text: {generated_text}")
