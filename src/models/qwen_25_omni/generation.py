@@ -26,6 +26,7 @@ def media_encoder(
         logger.info("\ntext without system prompt:")
         logger.info(text)
 
+    logger.info(f"text: {repr(text)}")
     # e.g.: text from video + text =
     # <|im_start|>system
     # You are a helpful assistant.<|im_end|>

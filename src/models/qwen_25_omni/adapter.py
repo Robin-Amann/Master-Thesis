@@ -72,6 +72,7 @@ class QwenOmniAdapter(ModelAdapter):
     def get_positions(self, state: GenerationState, input_ids: torch.Tensor) :
         # indicate the positions of inputs in the sequence
         # https://huggingface.co/docs/transformers/v4.47.1/kv_cache
+        # [context_len, context_len+1, ..., context_len+input_ids.shape[1]-1]
         cache_position = torch.arange(
             state.context_len,
             state.context_len + input_ids.shape[1],
@@ -81,6 +82,7 @@ class QwenOmniAdapter(ModelAdapter):
 
         # token’s position in the list of tokens
         # https://huggingface.co/docs/transformers/glossary
+        # [ [logical_len, logical_len+1, ..., logical_len+input_ids.shape[1]-1] ]
         position_ids = torch.arange(
             state.context_logical_len,
             state.context_logical_len + input_ids.shape[1],

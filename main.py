@@ -4,6 +4,9 @@ from src.config_types.benchmark import load_config, BenchmarkConfig
 from src.procedures.eviction.loader import load_strategy
 from src.models.qwen_25_omni.adapter import QwenOmniAdapter
 import torch
+from transformers import Qwen2_5OmniProcessor, Qwen2_5OmniForConditionalGeneration
+from qwen_omni_utils import process_mm_info
+
 
 config = load_config("./configs/benchmark.yaml")
 
@@ -43,34 +46,129 @@ def load_eviction_strategy(config: BenchmarkConfig) :
 
 model = QwenOmniAdapter(config.model)
 eviction_strategy = load_eviction_strategy(config)
-entry = load_entry(config)
+# entry = load_entry(config)
 
 
-media_inputs = model.prepare_inputs(
-    entry, 
-    use_audio_in_video=False,
-    use_text=False
+def encode(
+    messages: list[dict], 
+    text: list[int],
+    use_audio_in_video: bool = False, 
+):
+    audios, images, videos = process_mm_info(
+        messages,
+        use_audio_in_video=use_audio_in_video,
+    )
+    if videos is not None :
+        # batch x [n_samples, n_colors, width*height (resolution)]
+        logger.info(f"\nvideos:  {len(videos)} x {videos[0].shape} ([n_samples, n_colors, width, height (resolution)])")
+            
+    inputs = model.hf_processor(
+        text=[text],
+        audio=audios,
+        images=images,
+        videos=videos,
+        return_tensors="pt",
+        padding=True,
+        use_audio_in_video=use_audio_in_video,
+    )
+
+    return inputs
+
+
+
+inputs = encode(
+    messages=[{
+        'role': 'user', 
+        'content': [{
+            'type': 'video', 
+            'video': '/export/data1/ramann/hub/datasets--OpenGVLab--MVBench/snapshots/230a2d4fac8900333c61754641c7a13e069ac9c6/video/perception/videos/video_6480.mp4', 
+            'fps': 1.0
+        }, {
+            'type': 'text', 
+            'text': 'How many times did the person launch objects on the table?'
+        }]
+    }],
+    text='<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_bos|><|VIDEO|><|vision_eos|>How many times did the person launch objects on the table?<|im_end|>\n',
 )
 
-text_inputs = model.prepare_inputs(
-    entry, 
-    use_video=False,
-    remove_system_message=False
+text_ids, text, state = model.generate(inputs=inputs)
+logger.info(text)
+
+media_inputs = encode(
+    messages=[{
+        'role': 'user', 
+        'content': [{
+            'type': 'video', 
+            'video': '/export/data1/ramann/hub/datasets--OpenGVLab--MVBench/snapshots/230a2d4fac8900333c61754641c7a13e069ac9c6/video/perception/videos/video_6480.mp4', 
+            'fps': 1.0
+        }]
+    }],
+    text='<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_bos|><|VIDEO|><|vision_eos|>',
 )
 
+text_inputs = encode(
+    messages=[{
+        'role': 'user', 
+        'content': [{
+            'type': 'text', 
+            'text': 'How many times did the person launch objects on the table?'
+        }]
+    }],
+    text='How many times did the person launch objects on the table?<|im_end|>\n',
+)
+
+state = model.prefill(inputs=media_inputs)
+text_ids, text, state = model.generate(state=state, inputs=text_inputs)
+logger.info(text)
+
+
+
+
+# # '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_bos|><|VIDEO|><|vision_eos|>How many times did the person launch objects on the table?<|im_end|>\n'
+# # input_ids: 5070
 # inputs = model.prepare_inputs(
 #     entry, 
 #     use_audio_in_video=False,
 # )
-state = model.prefill(inputs=media_inputs)
-logger.info(str([state.past_key_values.get_seq_length(), state.context_len, state.context_logical_len, state.eos_token_ids, state.finished]))
 
-text_ids, text, state = model.generate(state=state, inputs=text_inputs)
-# text_ids, text, state = model.generate(inputs=inputs)
+# # '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_bos|><|VIDEO|><|vision_eos|><|im_end|>\n'
+# # input_ids: 5058
+# media_inputs = model.prepare_inputs(
+#     entry, 
+#     use_text=False,
+#     use_audio_in_video=False,
+# )
 
-logger.info(f"text ids {text_ids}, {text_ids.shape}")
-logger.info(f"generated text: {text[0]}")
-logger.info(str([state.past_key_values.get_seq_length(), state.context_len, state.context_logical_len, state.eos_token_ids, state.finished]))
+# # '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHow many times did the person launch objects on the table?<|im_end|>\n'
+# # input_ids: 28
+# text_inputs = model.prepare_inputs(
+#     entry, 
+#     use_video=False,
+#     remove_system_message=False,
+#     use_audio_in_video=False,
+# )
+# # '<|im_start|>user\nHow many times did the person launch objects on the table?<|im_end|>\n'
+# # input_ids: 17
+# text_inputs = model.prepare_inputs(
+#     entry, 
+#     use_video=False,
+#     remove_system_message=True,
+#     use_audio_in_video=False,
+# )
+
+
+
+
+
+# state = model.prefill(inputs=media_inputs)
+# logger.info(str([state.past_key_values.get_seq_length(), state.context_len, state.context_logical_len, state.eos_token_ids, state.finished]))
+
+# text_ids, text, state = model.generate(state=state, inputs=text_inputs)
+# # text_ids, text, state = model.generate(inputs=inputs)
+
+# logger.info(f"text ids {text_ids}, {text_ids.shape}")
+# logger.info(f"generated text: {text[0]}")
+# logger.info(str([state.past_key_values.get_seq_length(), state.context_len, state.context_logical_len, state.eos_token_ids, state.finished]))
 
 
 # logger.info("\n\n### Prepare media inputs:")
