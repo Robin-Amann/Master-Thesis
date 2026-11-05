@@ -1,5 +1,5 @@
 import kvpress
-from typing import Optional, Any
+from typing import Any
 
 def load_strategy(name: str, args: dict[str, Any]) :
     """args can be a empty dict if no arguments are necessary"""

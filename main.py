@@ -44,10 +44,10 @@ def load_eviction_strategy(config: BenchmarkConfig) :
     return eviction_strategy
 
 
-model = QwenOmniAdapter(config.model)
 eviction_strategy = load_eviction_strategy(config)
 # entry = load_entry(config)
 
+model = QwenOmniAdapter(config.model)
 
 def encode(
     messages: list[dict], 
@@ -91,7 +91,9 @@ inputs = encode(
     text='<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_bos|><|VIDEO|><|vision_eos|>How many times did the person launch objects on the table?<|im_end|>\n',
 )
 
+logger.info(f"inputs: {inputs["input_ids"].shape}")
 text_ids, text, state = model.generate(inputs=inputs)
+logger.info(str(state))
 logger.info(text)
 
 media_inputs = encode(
@@ -103,7 +105,7 @@ media_inputs = encode(
             'fps': 1.0
         }]
     }],
-    text='<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_bos|><|VIDEO|><|vision_eos|>',
+    text='<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_bos|><|VIDEO|><|vision_eos|><|im_end|>\n',
 )
 
 text_inputs = encode(
@@ -114,12 +116,17 @@ text_inputs = encode(
             'text': 'How many times did the person launch objects on the table?'
         }]
     }],
-    text='How many times did the person launch objects on the table?<|im_end|>\n',
+    text='<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHow many times did the person launch objects on the table?<|im_end|>\n',
 )
 
+logger.info(f"media inputs: {media_inputs["input_ids"].shape}")
+logger.info(f"text inputs: {text_inputs["input_ids"].shape}")
 state = model.prefill(inputs=media_inputs)
+logger.info(str(state))
+logger.info(model.hf_model.thinker.rope_deltas)
 text_ids, text, state = model.generate(state=state, inputs=text_inputs)
 logger.info(text)
+logger.info(str(state))
 
 
 

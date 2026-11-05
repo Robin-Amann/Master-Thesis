@@ -8,10 +8,10 @@
 # @torch.inference_mode()
 # def forward(
 #     self,
-#     state: Optional[GenerationState] = None,
-#     inputs: Optional[dict[str, Any]] = None,
+#     state: GenerationState | None = None,
+#     inputs: dict[str, Any] | None = None,
 #     press=None,
-#     model_kwargs: Optional[dict[str, Any]] = None,
+#     model_kwargs: dict[str, Any] | None = None,
 # ) -> GenerationState:
 
 #     model_kwargs = dict(model_kwargs or {})

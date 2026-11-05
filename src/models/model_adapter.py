@@ -3,7 +3,6 @@ from transformers import PreTrainedModel, AutoProcessor
 from src.config_types.model import ModelConfig
 import torch
 from src.models.shared_logic.generation import GenerationState
-from typing import Optional
 from abc import ABC, abstractmethod
 
 class ModelAdapter:
@@ -34,16 +33,16 @@ class ModelAdapter:
     def prefill( 
         self,
         inputs: dict[str, Any],
-        state: Optional[GenerationState] = None,
+        state: GenerationState | None = None,
         press=None,
-        model_kwargs: Optional[dict[str, Any]] = None
+        model_kwargs: dict[str, Any] | None = None
     ) -> GenerationState: 
         raise NotImplementedError()
 
 
     @torch.inference_mode()
     @abstractmethod
-    def generate(self, state: GenerationState) -> Optional[int]:
+    def generate(self, state: GenerationState) -> int | None:
         # multiple generate
         raise NotImplementedError()
 
@@ -51,11 +50,11 @@ class ModelAdapter:
     @abstractmethod
     def predict(
         self,
-        state: Optional[GenerationState] = None,
-        inputs: Optional[dict[str, Any]] = None,
+        state: GenerationState | None = None,
+        inputs: dict[str, Any] | None = None,
         max_new_tokens: int = 128, # TODO: constant
         press=None,
-        model_kwargs: Optional[dict[str, Any]] = None,
+        model_kwargs: dict[str, Any] | None = None,
         return_state: bool = False,
     ) -> str | tuple[str, GenerationState]:
         raise NotImplementedError()

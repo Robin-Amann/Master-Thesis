@@ -5,7 +5,7 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 from src.config_types.model import ModelConfig
-from typing import Optional, Any
+from typing import Any
 
 class ExperimentConfig(BaseModel):
     name: str
