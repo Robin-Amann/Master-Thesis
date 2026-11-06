@@ -1,7 +1,6 @@
 import torch
 from typing import Any
 from transformers import DynamicCache, Qwen2_5OmniProcessor, Qwen2_5OmniForConditionalGeneration
-
 from src.models.model_adapter import ModelAdapter
 from src.config_types.model import ModelConfig
 from src.models.qwen_25_omni.generation import media_encoder, prefill_validate_inputs
@@ -9,22 +8,39 @@ from src.models.shared_logic.load_model import load_model
 from src.models.shared_logic.generation import GenerationState, get_eos_token_ids, move_inputs_to_device
 from src.utils.logger import logger
 
+from src.models.qwen_25_omni.thinker import forward as thinker_forward
+
+from types import MethodType
+
 
 class QwenOmniAdapter(ModelAdapter):
 
     def __init__(self, config: ModelConfig):
         super().__init__(config)
-        model, processor = load_model(
-            model_name=config.checkpoint, 
-            model_class=Qwen2_5OmniForConditionalGeneration,
-            torch_dtype=torch.bfloat16, 
-            device=torch.device(config.device),
-            model_kwargs={}, 
-            processor_kwargs={}
+
+        model: Qwen2_5OmniForConditionalGeneration = Qwen2_5OmniForConditionalGeneration.from_pretrained(
+            config.checkpoint,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            # **model_kwargs
         )
+        # model.thinker.model = ThinkerTextModel._from_config(
+        #     model.config.thinker_config.text_config,
+        #     torch_dtype=torch.bfloat16,
+        #     # device_map="auto",
+        # )
+        model.thinker.model.forward = MethodType(thinker_forward, model.thinker.model)
+        model.eval()
+        model = model.to(torch.device(config.device))
+
+        processor = Qwen2_5OmniProcessor.from_pretrained(
+            config.checkpoint,
+            # **processor_kwargs
+        )
+
         # if you use full model instead of only thinker use return_audio=False for generate(...)
-        self.hf_model: Qwen2_5OmniForConditionalGeneration = model
-        self.hf_processor: Qwen2_5OmniProcessor = processor
+        self.hf_model = model
+        self.hf_processor = processor
 
 
     def prepare_inputs(
@@ -90,21 +106,19 @@ class QwenOmniAdapter(ModelAdapter):
             input_attentions = torch.ones((batch_size, seq_len), device=device, dtype=torch.long)
         attention_mask = torch.cat([ state.attention_mask.to(device), input_attentions.to(device) ], dim=-1)
 
-        # Physical KV-cache positions.
-        cache_position = torch.arange(
-            state.context_len,
-            state.context_len + seq_len,
-            device=device,
-            dtype=torch.long,
+        # don't use position ids for media inputs because they use rope 
+        media_key = ["feature_attention_mask", "pixel_values", "image_grid_thw", "pixel_values_videos", "video_grid_thw", "video_second_per_grid"]
+        if any( key in inputs for key in media_key ) :
+            return None, attention_mask
+
+        # token position = seqeuence position + rope delta
+        position_ids = (
+            torch.arange(0, seq_len, device=device, dtype=torch.long)
+            + state.context_len
+            + state.rope_deltas
         )
 
-        # position ids do save as rope delta so don't use them because model keeps track of delta
-        # N -> [1, N] | [1, N] + [B, 1] -> [B, N]
-        # text_positions = cache_position.unsqueeze(0) + state.rope_deltas.to(device)
-        # # [B, N] -> [1, B, N] | [1, B, N] -> [3, B, N]
-        # position_ids = text_positions.unsqueeze(0).expand(3, batch_size, seq_len)
-
-        return cache_position, attention_mask  # , position_ids
+        return position_ids, attention_mask
 
 
     @torch.inference_mode()
@@ -134,18 +148,14 @@ class QwenOmniAdapter(ModelAdapter):
         if state.context_len < state.past_key_values.get_seq_length() :
             state.past_key_values.crop(state.context_len)
             # attention mask and rope_deltas correspond to context len
-            
-        cache_position, attention_mask = self.get_positions(state, inputs)
+    
+        position_ids, attention_mask = self.get_positions(state, inputs)
 
-        # TODO: check how rope delta actually behaves in implementation. 
-        # seems like it does not matter what i set rope delta to because it 
-        # depends on attention mask and other things. 
         kwargs = {
             **inputs,
-            "attention_mask": attention_mask,
             "past_key_values": state.past_key_values,
-            "cache_position": cache_position,
-            "rope_deltas": state.rope_deltas,
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
             "use_cache": True,
             "return_dict": True,
             **model_kwargs,
@@ -188,15 +198,26 @@ class QwenOmniAdapter(ModelAdapter):
         if state.context_len < state.past_key_values.get_seq_length() :
             state.past_key_values.crop(state.context_len)
 
-        cache_position, full_attention_mask = self.get_positions(state, inputs)
+        position_ids, attention_mask = self.get_positions(state, inputs)
+
+        # I don't know why but generate needs cache positions. forward doesn't for some reason
+        cache_position = torch.arange(
+            0,
+            inputs["input_ids"].shape[1], 
+            device=inputs["input_ids"].device, 
+            dtype=torch.long
+        ) + state.past_key_values.get_seq_length()
+
+        logger.info(f"cache position: {cache_position}")
 
         # generate has no parameter "return_dict"
         kwargs = {
             **inputs,
             "use_cache": True,
             "past_key_values": state.past_key_values,
+            "position_ids": position_ids,
+            "attention_mask": attention_mask,
             "cache_position": cache_position,
-            "attention_mask": full_attention_mask,
             "return_audio": False,
             **(model_kwargs or {})
         }
