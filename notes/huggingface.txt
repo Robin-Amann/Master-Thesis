@@ -1,0 +1,10 @@
+Dataset files:
+Extension	Purpose	                                                        Can you delete it?
+.arrow	    Stores the actual dataset records in columnar format	        No, if you need the data
+.lock	    Prevents concurrent processes from modifying the same cache	    Usually safe if no process is using it
+.json	    Dataset metadata or configuration	                            Depends on its role
+.jsonl	    Records stored as JSON Lines	                                No, if it contains data
+.parquet	Columnar dataset format	                                        No, if you need the data
+.bin	    Binary data or serialized objects	                            Depends on its role
+.txt	    Text data or metadata	                                        Depends on its role
+.cache	    Cached processing information	                                Usually regenerable

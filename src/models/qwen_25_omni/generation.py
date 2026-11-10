@@ -6,25 +6,27 @@ from src.utils.logger import logger
 def media_encoder(
     processor: Qwen2_5OmniProcessor, 
     messages: list[dict], 
+    text: str = None,
     use_audio_in_video: bool = True, 
     remove_system_message: bool = False
 ):
     # The add_generation_prompt argument is used to add a 
     # generation prompt, which refers to <|im_start|>assistant\n to the input.
-    text = processor.apply_chat_template(
-        messages,
-        tokenize=False,
-        add_generation_prompt=False,
-    )
+    if text is None :
+        text = processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
 
-    logger.info("\ntext:")
-    logger.info(text)
-
-    if remove_system_message :
-        index = text.find("<|im_start|>user")
-        text = text[index:]
-        logger.info("\ntext without system prompt:")
+        logger.info("\ntext:")
         logger.info(text)
+
+        if remove_system_message :
+            index = text.find("<|im_start|>user")
+            text = text[index:]
+            logger.info("\ntext without system prompt:")
+            logger.info(text)
 
     logger.info(f"text: {repr(text)}")
     # e.g.: text from video + text =

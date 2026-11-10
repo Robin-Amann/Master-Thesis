@@ -1,5 +1,5 @@
 from src.utils.logger import logger
-from src.data.loader import load_hf_dataset
+from src.data.loader import load_hf_dataset, download_hf_dataset_files
 from src.config_types.benchmark import load_config, BenchmarkConfig
 from src.procedures.eviction.loader import load_strategy
 from src.models.qwen_25_omni.adapter import QwenOmniAdapter
@@ -7,188 +7,60 @@ import torch
 from transformers import Qwen2_5OmniProcessor, Qwen2_5OmniForConditionalGeneration
 from qwen_omni_utils import process_mm_info
 
-
 config = load_config("./configs/benchmark.yaml")
-
-def load_entry(config: BenchmarkConfig) :
-    source = config.datasets[4].source
-
-    logger.info("data source:")
-    logger.info(source)
-
-    dataset = load_hf_dataset(source, limit=10)
-    logger.info("dataset:")
-    logger.info(dataset)
-
-    base = "/export/data1/ramann/hub/datasets--OpenGVLab--MVBench/snapshots/230a2d4fac8900333c61754641c7a13e069ac9c6/video/perception/videos/"
-    # video_6480.mp4 is 15 sec.
-    logger.info("video base:")
-    logger.info(base)
-
-    dataset = dataset.map(
-        lambda row: {"video_path": base + row["video"], "text": row["question"]},
-        remove_columns=["video", "question"]
-    )
-
-    entry = dataset[0]
-
-    logger.info("\nentry:")
-    logger.info(entry)
-
-    return entry
-
-def load_eviction_strategy(config: BenchmarkConfig) :
-    strategy = config.eviction.strategies[0]
-    args = strategy.args or {}
-    eviction_strategy = load_strategy(strategy.name, args | {"compression_ratio": 0.5} )  
-    return eviction_strategy
-
-
-eviction_strategy = load_eviction_strategy(config)
-# entry = load_entry(config)
-
 model = QwenOmniAdapter(config.model)
 
-def encode(
-    messages: list[dict], 
-    text: list[int],
-    use_audio_in_video: bool = False, 
-):
-    audios, images, videos = process_mm_info(
-        messages,
-        use_audio_in_video=use_audio_in_video,
-    )
-    if videos is not None :
-        # batch x [n_samples, n_colors, width*height (resolution)]
-        logger.info(f"\nvideos:  {len(videos)} x {videos[0].shape} ([n_samples, n_colors, width, height (resolution)])")
-            
-    inputs = model.hf_processor(
-        text=[text],
-        audio=audios,
-        images=images,
-        videos=videos,
-        return_tensors="pt",
-        padding=True,
-        use_audio_in_video=use_audio_in_video,
-    )
+def load_entry() :
+    def p(x) :
+        return x["level"] == "1" and x["group_type"] == "relevance" and x["second_head"] == "Frame-Only"
 
-    return inputs
+    # 312 questions over 78 videos | 112 has about 4 minutes [ids: 12-15]
+    # /export/data1/ramann/huggingface/hub/Video-MME-v2/xxx.mp4
+    dataset = load_hf_dataset(config.datasets[3].source).filter(lambda x: p(x), batched=False)
+    # dataset = dataset.add_column("video_path", [ f"/export/data1/ramann/huggingface/hub/Video-MME-v2/{x}.mp4" for x in dataset["video_id"]])
+    dataset = dataset.map(lambda item: {
+        'video_path': f"/export/data1/ramann/huggingface/hub/Video-MME-v2/{item["video_id"]}.mp4",
+        'text': f"{item["question"]}\noptions:\n{item["options"]}"
+    }, remove_columns=["url", "group_type", "group_structure", "level", "second_head", "third_head"])
+    # print(len(set(dataset["video_id"])))
 
+    entry = dataset[12]
+    return entry
 
+entry = load_entry()
 
-inputs = encode(
-    messages=[{
-        'role': 'user', 
-        'content': [{
-            'type': 'video', 
-            'video': '/export/data1/ramann/hub/datasets--OpenGVLab--MVBench/snapshots/230a2d4fac8900333c61754641c7a13e069ac9c6/video/perception/videos/video_6480.mp4', 
-            'fps': 1.0
-        }, {
-            'type': 'text', 
-            'text': 'How many times did the person launch objects on the table?'
-        }]
-    }],
-    text='<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_bos|><|VIDEO|><|vision_eos|>How many times did the person launch objects on the table?<|im_end|>\n',
-)
+inputs = model.prepare_inputs(entry, use_audio_in_video=False)
+N = inputs["input_ids"].shape[1]
+t, h, w = inputs["video_grid_thw"][0].tolist() # 29, 40, 72
+N_video = t * h * w / 4
+N_text = N - N_video
+video_start = 16 # maybe starts at 15?
+token_per_frame = N_video / t
 
-logger.info(f"inputs: {inputs["input_ids"].shape}")
-text_ids, text, state = model.generate(inputs=inputs)
+n_frames = 2
+n = int(video_start + n_frames * token_per_frame)
+new_inputs = {
+    "input_ids": inputs["input_ids"][:, :n],
+    "attention_mask": inputs["attention_mask"][:, :n],
+    "pixel_values_videos": inputs["pixel_values_videos"][: h * w * n_frames, :],
+    "video_grid_thw": inputs["video_grid_thw"][:, :],
+    "video_second_per_grid": inputs["video_second_per_grid"][:]
+}
+
+new_inputs["video_grid_thw"][0][0] = n_frames
+
+print(new_inputs)
+text_ids, text, state = model.generate(inputs=new_inputs)
 logger.info(str(state))
 logger.info(text)
 
-media_inputs = encode(
-    messages=[{
-        'role': 'user', 
-        'content': [{
-            'type': 'video', 
-            'video': '/export/data1/ramann/hub/datasets--OpenGVLab--MVBench/snapshots/230a2d4fac8900333c61754641c7a13e069ac9c6/video/perception/videos/video_6480.mp4', 
-            'fps': 1.0
-        }]
-    }],
-    text='<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_bos|><|VIDEO|><|vision_eos|><|im_end|>\n',
-)
+# media_inputs = model.prepare_inputs(entry, use_text=False)
+# text_inputs = model.prepare_inputs(entry, use_video=False)
 
-text_inputs = encode(
-    messages=[{
-        'role': 'user', 
-        'content': [{
-            'type': 'text', 
-            'text': 'How many times did the person launch objects on the table?'
-        }]
-    }],
-    text='<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHow many times did the person launch objects on the table?<|im_end|>\n',
-)
-
-logger.info(f"media inputs: {media_inputs["input_ids"].shape}")
-logger.info(f"text inputs: {text_inputs["input_ids"].shape}")
-state = model.prefill(inputs=media_inputs)
-logger.info(str(state))
-logger.info(model.hf_model.thinker.rope_deltas)
-text_ids, text, state = model.generate(state=state, inputs=text_inputs)
-logger.info(text)
-logger.info(str(state))
-
-
-
-
-# # '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_bos|><|VIDEO|><|vision_eos|>How many times did the person launch objects on the table?<|im_end|>\n'
-# # input_ids: 5070
-# inputs = model.prepare_inputs(
-#     entry, 
-#     use_audio_in_video=False,
-# )
-
-# # '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_bos|><|VIDEO|><|vision_eos|><|im_end|>\n'
-# # input_ids: 5058
-# media_inputs = model.prepare_inputs(
-#     entry, 
-#     use_text=False,
-#     use_audio_in_video=False,
-# )
-
-# # '<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\nHow many times did the person launch objects on the table?<|im_end|>\n'
-# # input_ids: 28
-# text_inputs = model.prepare_inputs(
-#     entry, 
-#     use_video=False,
-#     remove_system_message=False,
-#     use_audio_in_video=False,
-# )
-# # '<|im_start|>user\nHow many times did the person launch objects on the table?<|im_end|>\n'
-# # input_ids: 17
-# text_inputs = model.prepare_inputs(
-#     entry, 
-#     use_video=False,
-#     remove_system_message=True,
-#     use_audio_in_video=False,
-# )
-
-
-
-
-
+# logger.info(f"media inputs: {media_inputs["input_ids"].shape}")
+# logger.info(f"text inputs: {text_inputs["input_ids"].shape}")
 # state = model.prefill(inputs=media_inputs)
-# logger.info(str([state.past_key_values.get_seq_length(), state.context_len, state.context_logical_len, state.eos_token_ids, state.finished]))
-
+# logger.info(str(state))
 # text_ids, text, state = model.generate(state=state, inputs=text_inputs)
-# # text_ids, text, state = model.generate(inputs=inputs)
-
-# logger.info(f"text ids {text_ids}, {text_ids.shape}")
-# logger.info(f"generated text: {text[0]}")
-# logger.info(str([state.past_key_values.get_seq_length(), state.context_len, state.context_logical_len, state.eos_token_ids, state.finished]))
-
-
-# logger.info("\n\n### Prepare media inputs:")
-# media_inputs = model.prepare_inputs(entry, use_audio_in_video=False, use_text=False)
-# logger.info("\n\n### Prepare text inputs:")
-# text_inputs = model.prepare_inputs(entry, use_video=False, remove_system_message=True)
-
-# logger.info("\n\n### Prefill:")
-# state = model.prefill(inputs=media_inputs, press=eviction_strategy)
-# logger.info(f"seq_length: {state.past_key_values.get_seq_length()}")
-
-# logger.info("\n\n### Predict:")
-# generated_text, output_state = model.predict(state=state, inputs=text_inputs, return_state=True)
-# logger.info(f"old seq_length: {state.past_key_values.get_seq_length()}")
-# logger.info(f"new seq_length: {output_state.past_key_values.get_seq_length()}")
-# logger.info(f"generated_text: {generated_text}")
+# logger.info(text)
+# logger.info(str(state))

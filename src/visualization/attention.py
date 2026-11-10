@@ -72,6 +72,8 @@ def plot_attention_grid(
     """
 
     print("load data")
+    # [ prefill       0              ]
+    # [ gen_prefill   gen_generation ]
     attention_prefill: torch.Tensor = torch.load(data_dir / 'prefill.pt')                 # [L, H, N, N]
     attention_gen_prefill: torch.Tensor = torch.load(data_dir / 'gen_prefill.pt')         # [L, H, M, N]
     attention_gen_generation: torch.Tensor = torch.load(data_dir / 'gen_generation.pt')   # [L, H, M, M]

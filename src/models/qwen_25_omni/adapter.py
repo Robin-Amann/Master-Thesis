@@ -42,6 +42,11 @@ class QwenOmniAdapter(ModelAdapter):
         self.hf_model = model
         self.hf_processor = processor
 
+        logger.info(f"thinker attention {model.thinker.model._attn_implementation}")
+
+        # configs
+        # model.config.to_json_file("model_config.json")
+
 
     def prepare_inputs(
         self, 
@@ -51,6 +56,7 @@ class QwenOmniAdapter(ModelAdapter):
         use_video: bool = True, 
         use_audio_in_video: bool = True, 
         use_text: bool = True,
+        encoder_text: str = None,
         remove_system_message: bool = False
     ) :
         # build messages
@@ -60,7 +66,7 @@ class QwenOmniAdapter(ModelAdapter):
         if "image_path" in entry and use_image:
             content.append({"type": "image", "image": entry["image_path"]})
         if "video_path" in entry and use_video:
-            content.append({"type": "video", "video": entry["video_path"], "fps": 1.0})
+            content.append({"type": "video", "video": entry["video_path"], "fps": 0.2})
         if "text" in entry and use_text:
             content.append({"type": "text", "text": entry["text"]})
 
@@ -76,7 +82,7 @@ class QwenOmniAdapter(ModelAdapter):
         logger.info(str(messages))
 
         audio_in_video = "video_path" in entry and use_video and use_audio_in_video
-        inputs = media_encoder(self.hf_processor, messages, audio_in_video, remove_system_message)
+        inputs = media_encoder(self.hf_processor, messages, encoder_text, audio_in_video, remove_system_message)
         return inputs
 
 
@@ -221,8 +227,8 @@ class QwenOmniAdapter(ModelAdapter):
             "return_audio": False,
             **(model_kwargs or {})
         }
- 
         text_ids = self.hf_model.generate(**kwargs)
+        
         logger.info(f"post generate KV Cache seq length: {state.past_key_values.get_seq_length()}")
 
         # Qwen returns all tokens so remove input tokens

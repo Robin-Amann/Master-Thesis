@@ -8,6 +8,7 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.models.qwen2_5_omni.configuration_qwen2_5_omni import Qwen2_5OmniTextConfig
 from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import Qwen2_5OmniThinkerTextModel, logger, create_causal_mask, create_sliding_window_causal_mask
 
+from src.utils.logger import logger as my_logger
 
 # transformers.models.qwen2_5_omni.modeling_qwen2_5_omnipy -> Qwen2_5OmniThinkerTextModel.forward [line 1610]
 def forward(
@@ -79,6 +80,8 @@ def forward(
         # If inputs are not packed (usual 3D positions), do not prepare mask from position_ids
         text_position_ids = None
 
+    my_logger.info(f"position_ids: {position_ids.shape}")
+    my_logger.info(position_ids.tolist())
     # It may already have been prepared by e.g. `generate`
     if not isinstance(causal_mask_mapping := attention_mask, dict):
         # Prepare mask arguments
