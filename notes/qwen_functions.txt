@@ -1,0 +1,54 @@
+Qwen2_5OmniForConditionalGeneration(Qwen2_5OmniPreTrainedModel, GenerationMixin)
++ thinker: Qwen2_5OmniThinkerForConditionalGeneration
+> enable_talker
+> load_speakers
+> disable_talker
+> generate
+  - manage kwargs
+  - self.thinker.generate(**kwargs)
+
+
+Qwen2_5OmniThinkerForConditionalGeneration(Qwen2_5OmniPreTrainedModelForConditionalGeneration, GenerationMixin)
++ audio_tower: Qwen2_5OmniAudioEncoder
++ visual: Qwen2_5OmniVisionEncoder
++ model: Qwen2_5OmniThinkerTextModel
++ lm_head: nn.Linear
++ rope_deltas: Tensor
+> get_video_features
+> get_image_feature
+> get_placeholder_mask
+> forward
+  - Extract the input embeddings
+  - Merge text , audios , image and video
+  - set position_ids/ rope_deltas
+  - self.model(...)
+  - apply lm_head
+
+> prepare_inputs_for_generation
+
+Qwen2_5OmniThinkerTextModel(Qwen2_5OmniPreTrainedModel)
++ padding_idx
++ layers: Qwen2_5OmniDecoderLayer[]
++ _attn_implementation: str
++ has_sliding_layers
++ rotary_emb: Qwen2_5OmniRotaryEmbedding
+> forward
+  - set kwargs
+  - set position_ids
+  - for layer in layers: outputs = layer(...)
+
+
+Qwen2_5OmniPreTrainedModel(PreTrainedModel)
+
+
+PreTrainedModel(nn.Module, EmbeddingAccessMixin, ModuleUtilsMixin, PushToHubMixin, PeftAdapterMixin)
+
+
+model: Qwen2_5OmniForConditionalGeneration
+model.thinker(**kwargs)
+> Qwen2_5OmniThinkerTextModel.forward
+  > Qwen2_5OmniDecoderLayer.forward
+model.generate(**kwargs)
+> Qwen2_5OmniPreTrainedModel.generate = PreTrainedModel.generate
+
+

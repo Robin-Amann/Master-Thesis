@@ -1,0 +1,21 @@
+image_token_id          151655  
+video_token_id          151656  <|VIDEO|>
+audio_token_id          151646  
+vision_start_token_id   151652  <|vision_bos|>
+vision_end_token_id     151653  <|vision_eos|>
+audio_start_token_id    151647  
+                        151644  <|im_start|>
+                        151645  <|im_end|>
+                        198     \n
+
+position_id_per_seconds 25
+seconds_per_chunk       2
+
+
+
+
+
+
+
+
+

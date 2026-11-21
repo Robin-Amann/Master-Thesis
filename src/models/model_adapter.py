@@ -10,7 +10,7 @@ class ModelAdapter:
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
-        self.hf_model: PreTrainedModel = None
+        # self.hf_model: PreTrainedModel = None
 
     
     @abstractmethod

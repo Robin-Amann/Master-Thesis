@@ -35,6 +35,16 @@ def download_hf_dataset_files(repo: str, revision: str | None = None, patterns: 
 
 
 
+def load_MVBench(config="action_count") :
+    dataset_config = DatasetSourceConfig(repo="OpenGVLab/MVBench", split="train", config=config)
+    dataset = load_hf_dataset(dataset_config)
+    dataset = dataset.map(lambda item: {
+        'video_path':f"/export/data1/ramann/huggingface/MVBench-action-count/{item["video"]}",
+        'text': f"{item["question"]}\noptions:\n{str(item["candidates"])}"
+    })
+
+    return dataset
+
 
 # import os
 # import zipfile

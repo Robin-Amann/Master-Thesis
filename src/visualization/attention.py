@@ -1,10 +1,12 @@
 import matplotlib.pyplot as plt
-import numpy as np
+from matplotlib.axes import Axes
+
 from pathlib import Path
+import os
 import torch
 
 
-def _set_labels(ax, display_matrix, cmap, boundary, layer_idx, head_idx, n_layers) :
+def _set_labels(ax: Axes, display_matrix: torch.Tensor, cmap, boundaries: list[int], layer_idx: int, head_idx: int, n_layers: int) :
     im = ax.imshow(
         display_matrix.detach().cpu().numpy(),
         aspect="auto",
@@ -15,17 +17,18 @@ def _set_labels(ax, display_matrix, cmap, boundary, layer_idx, head_idx, n_layer
     )
 
     # Prefill -> generation boundary.
-    ax.axvline(
-        boundary -0.25,
-        linewidth=0.5,
-        color="red",
-    )
+    for boundary in boundaries :
+        ax.axvline(
+            boundary -0.25,
+            linewidth=0.5,
+            color="red",
+        )
 
-    ax.axhline(
-        boundary -0.25,
-        linewidth=0.5,
-        color="red",
-    )
+        ax.axhline(
+            boundary -0.25,
+            linewidth=0.5,
+            color="red",
+        )
 
     ax.set_title(
         f"L{layer_idx} H{head_idx}",
@@ -52,10 +55,12 @@ def _set_labels(ax, display_matrix, cmap, boundary, layer_idx, head_idx, n_layer
 
 
 def plot_attention_grid(
-    data_dir: Path,
     output_file: Path,
     cmap="viridis",
     figsize_scale=2.5,
+    data_dir: Path = None,
+    attentions: torch.Tensor = None,
+    boundaries: list[int] = None
 ):
     """
     Plot an H x L grid.
@@ -71,21 +76,26 @@ def plot_attention_grid(
     context and generated tokens.
     """
 
-    print("load data")
-    # [ prefill       0              ]
-    # [ gen_prefill   gen_generation ]
-    attention_prefill: torch.Tensor = torch.load(data_dir / 'prefill.pt')                 # [L, H, N, N]
-    attention_gen_prefill: torch.Tensor = torch.load(data_dir / 'gen_prefill.pt')         # [L, H, M, N]
-    attention_gen_generation: torch.Tensor = torch.load(data_dir / 'gen_generation.pt')   # [L, H, M, M]
+    if attentions is None : 
+        print("load data")
+        # [ prefill       0              ]
+        # [ gen_prefill   gen_generation ]
+        attention_prefill: torch.Tensor = torch.load(data_dir / 'prefill.pt')                 # [L, H, N, N]
+        attention_gen_prefill: torch.Tensor = torch.load(data_dir / 'gen_prefill.pt')         # [L, H, M, N]
+        attention_gen_generation: torch.Tensor = torch.load(data_dir / 'gen_generation.pt')   # [L, H, M, M]
 
-    n_layers, n_heads, n_gen, n_prefill = attention_gen_prefill.shape
+        n_layers, n_heads, n_gen, n_prefill = attention_gen_prefill.shape
 
-    top_right = torch.zeros(n_layers, n_heads, n_prefill, n_gen, device="cpu", dtype=attention_prefill.dtype)
+        top_right = torch.zeros(n_layers, n_heads, n_prefill, n_gen, device="cpu", dtype=attention_prefill.dtype)
 
-    attentions = torch.cat([
-        torch.cat([attention_prefill, top_right], dim=-1),                      # [L, H, N, N+M]
-        torch.cat([attention_gen_prefill, attention_gen_generation], dim=-1),   # [L, H, M, N+M]
-    ], dim=-2)                                                                  # [L, H, N+M, N+M]
+        attentions = torch.cat([
+            torch.cat([attention_prefill, top_right], dim=-1),                      # [L, H, N, N+M]
+            torch.cat([attention_gen_prefill, attention_gen_generation], dim=-1),   # [L, H, M, N+M]
+        ], dim=-2)                                                                  # [L, H, N+M, N+M]
+    else :
+        n_layers, n_heads, n_gen, _ = attentions.shape
+        if boundaries is None :
+            boundaries = []
 
     # Figure
     print("create plot")
@@ -102,9 +112,9 @@ def plot_attention_grid(
     print("add matricies")
     for layer_idx in range(n_layers):
         for head_idx in range(n_heads):
-            display_matrix, boundary = attentions[layer_idx, head_idx, :, :], n_prefill
+            display_matrix = attentions[layer_idx, head_idx, :, :]
             ax = axes[layer_idx, head_idx]
-            _set_labels(ax, display_matrix, cmap, boundary, layer_idx, head_idx, n_layers)
+            _set_labels(ax, display_matrix, cmap, boundaries, layer_idx, head_idx, n_layers)
 
     # Global labels
     fig.suptitle(
@@ -132,3 +142,49 @@ def plot_attention_grid(
     )
 
     # plt.show()
+
+
+def plot_single_head(full_attentions: torch.Tensor) :
+    save_dir = "attention_plots"
+    os.makedirs(save_dir, exist_ok=True)
+
+    num_layers, num_heads, seq_len, _ = full_attentions.shape
+
+    for i in range(num_layers):
+        for j in range(num_heads):
+
+            # Extract attention matrix
+            attn = full_attentions[i, j].detach().float().cpu().numpy()
+
+            # Create heatmap
+            fig, ax = plt.subplots(figsize=(10, 8))
+
+            im = ax.imshow(
+                attn,
+                cmap="viridis",
+                aspect="auto",
+                origin="upper",
+                interpolation="nearest",
+            )
+
+            ax.set_title(f"Attention - Layer {i}, Head {j}")
+            ax.set_xlabel("Key position")
+            ax.set_ylabel("Query position")
+
+            fig.colorbar(im, ax=ax, label="Attention probability")
+
+            fig.tight_layout()
+
+            # Save figure
+            filename = f"attention_layer_{i}_head_{j}.png"
+
+            fig.savefig(
+                os.path.join(save_dir, filename),
+                dpi=150,
+                bbox_inches="tight",
+            )
+
+            plt.close(fig)
+
+    print(f"Saved {num_layers * num_heads} attention plots to {save_dir}")
+
