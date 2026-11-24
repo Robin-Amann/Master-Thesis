@@ -108,7 +108,7 @@ def calculate_attention_scores(
         head_dim = attn.head_dim
 
         # Reshape Q.
-        q = q.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2)
+        q = q.view(batch_size, seq_len, num_heads, head_dim).transpose(1, 2) # [B, N, H * head_dim] --> [B, N, H, head_dim] --> [B, H, N, head_dim]
 
         # Apply RoPE to Q.
         # K from the cache is already RoPE-transformed.
