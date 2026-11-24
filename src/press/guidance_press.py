@@ -38,24 +38,21 @@ class GuidancePress(BasePress):
         assert self.layer_cutoff >= 0
         assert self.prompt_type in ("guidance", "query")
 
-    # ---------------------------------------------------------
-    # Attention scoring
-
     def _get_query_states(
         self,
         module: nn.Module,
-        hidden_states: torch.Tensor,
-        kwargs: dict,
+        hidden_states: torch.Tensor,    # [B, P, d]
+        position_embeddings: tuple[torch.Tensor, torch.Tensor]
     ) -> torch.Tensor:
 
-        B, Q, _ = hidden_states.shape
-        D = module.head_dim
-        Hq = module.num_heads
+        B, P, _ = hidden_states.shape
+        D = module.head_dim     # 128 (d_head)
+        Hq = module.num_heads   # 16 (H)
 
-        q = module.q_proj(hidden_states)
-        q = q.view(B, Q, Hq, D).transpose(1, 2)
+        q = module.q_proj(hidden_states)    
+        q = q.view(B, P, Hq, D).transpose(1, 2)     # [B, H, P, d_head]
 
-        cos, sin = kwargs["position_embeddings"]
+        cos, sin = position_embeddings              # [3, B, P, d_head]
 
         # Qwen2.5-Omni multimodal RoPE
         q, _ = apply_multimodal_rotary_pos_emb(
@@ -63,18 +60,18 @@ class GuidancePress(BasePress):
             q,  # Dummy K; only the rotated Q is needed
             cos,
             sin,
-            module.rope_parameters["mrope_section"],
+            module.rope_parameters["mrope_section"],    # [16, 24, 24]
         )
 
-        return q
+        return q    # [B, H, P, d_head]
 
 
     def _get_attention_scores(
         self,
         module: nn.Module,
-        hidden_states: torch.Tensor,
-        context_keys: torch.Tensor,
-        kwargs: dict,
+        hidden_states: torch.Tensor,        # [B, P, d]
+        context_keys: torch.Tensor,         # [B, kv_heads, C, d_head]
+        position_embeddings: tuple[torch.Tensor, torch.Tensor]
     ) -> torch.Tensor:
         """
         Calculate query-to-context attention.
@@ -86,9 +83,9 @@ class GuidancePress(BasePress):
         Returns:
             Importance scores: [B, Hkv, C]
         """
-        q = self._get_query_states(module, hidden_states, kwargs)
+        q = self._get_query_states(module, hidden_states, position_embeddings)   # [B, H, P, d_head]
 
-        B, Hkv, C, D = context_keys.shape
+        B, Hkv, C, D = context_keys.shape 
         Hq = q.shape[1]
 
         if Hq % Hkv != 0:
@@ -102,9 +99,9 @@ class GuidancePress(BasePress):
         # Keys have already received the correct M-RoPE transformation
         # during the original attention forward pass.
         logits = torch.matmul(
-            q.float(),
-            context_keys.float().transpose(-1, -2),
-        ) * getattr(module, "scaling", D ** -0.5)
+            q.float(),                                                              # [B, H, P, d_head]
+            context_keys.float().repeat_interleave(groups, dim=1).transpose(-1, -2),     # [B, H, d_head, C]
+        ) * getattr(module, "scaling", D ** -0.5)       # [B, H, P, C]
 
         # All context tokens precede the guidance/query tokens.
         # Therefore, no additional causal mask is necessary.
@@ -112,30 +109,18 @@ class GuidancePress(BasePress):
 
         # Aggregate query heads belonging to each KV head,
         # and aggregate over guidance/query tokens.
-        scores = attention.reshape(
-            B, Hkv, groups, q.shape[2], C
-        ).mean(dim=(2, 3))
+        # [B, H, P, C] --> [B, kv_heads, H / kv_heads, P, C] --> [B, kv_heads, C]
+        scores = attention.reshape(B, Hkv, groups, q.shape[2], C).sum(dim=(2, 3))  
 
-        return scores
+        return scores # [B, kv_heads, C]
 
-    # ---------------------------------------------------------
-    # Token selection
-    # ---------------------------------------------------------
 
     def _select_tokens(
         self,
-        keys: torch.Tensor,
-        values: torch.Tensor,
-        scores: torch.Tensor,
+        keys: torch.Tensor,         # [B, kv_heads, C, d_head]
+        values: torch.Tensor,       # [B, kv_heads, C, d_head]
+        scores: torch.Tensor,       # [B, kv_heads, C]
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Select the highest-scoring context tokens independently
-        for each KV head.
-
-        Args:
-            keys, values: [B, Hkv, C, D]
-            scores: [B, Hkv, C]
-        """
         B, Hkv, C, D = keys.shape
 
         if self.compression_ratio == 0:
@@ -146,94 +131,90 @@ class GuidancePress(BasePress):
         if n_kept >= C:
             return keys, values
 
-        # Select the n_kept highest-scoring tokens.
-        indices = scores.topk(n_kept, dim=-1).indices
-
-        # Restore original token ordering.
-        indices = indices.sort(dim=-1).values
-
-        indices = indices.unsqueeze(-1).expand(-1, -1, -1, D)
+        indices = scores.topk(n_kept, dim=-1).indices           # [B, kv_heads, C']         C' = C * compression_ratio
+        indices = indices.sort(dim=-1).values                   # [B, kv_heads, C']
+        indices = indices.unsqueeze(-1).expand(-1, -1, -1, D)   # [B, kv_heads, C', d_head]
 
         return (
             keys.gather(dim=2, index=indices).contiguous(),
             values.gather(dim=2, index=indices).contiguous(),
         )
-    # ---------------------------------------------------------
-    # Main compression
-    # ---------------------------------------------------------
+
 
     def compress(
         self,
-        module: nn.Module,
-        hidden_states: torch.Tensor,
-        keys: torch.Tensor,
-        values: torch.Tensor,
-        attentions: torch.Tensor,
-        kwargs: dict,
+        module: nn.Module,              # Qwen2_5OmniAttention [Q, K, V, O projection + rotary_emb]
+        hidden_states: torch.Tensor,    # [B, N', d]        N' only new positions
+        keys: torch.Tensor,             # [B, kv_heads, N, d_head]
+        values: torch.Tensor,           # [B, kv_heads, N, d_head]
+        attentions: torch.Tensor,       # None
+        kwargs: dict,                   
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # kwargs
+        # - hidden_states       [B, N', d]
+        # - attention_mask      None
+        # - position_ids        None
+        # - past_key_values     DynamicCache
+        # - output_attentions   bool
+        # - use_cache           bool
+        # - cache_position      [N]
+        # - position_embeddings <tensor[[3, B, N', d_head]], tensor[[3, B, N', d_head]]>   <sin, cos>
 
-        layer_idx = module.layer_idx
-        q_len = hidden_states.shape[1]
+        layer_idx: int = module.layer_idx
+        q_len: int = hidden_states.shape[1]
 
         if self.prompt_type == "guidance":
-
             # Cache contains context || guidance.
-            context_len = keys.shape[2] - self.prompt_len
+            context_len = keys.shape[2] - self.prompt_len   # N - P         | N = C + P
 
             if context_len <= 0:
-                raise ValueError(
-                    "Invalid prompt_len: no context tokens remain."
-                )
+                raise ValueError("Invalid prompt_len: no context tokens remain.")
 
-            context_keys = keys[:, :, :context_len]
-            context_values = values[:, :, :context_len]
+            context_keys = keys[:, :, :context_len, :]
+            context_values = values[:, :, :context_len, :]
 
-            # Only the first layers use guidance-based pruning.
+            # Only the first layers use guidance-based pruning. just remove guidance prompt
             if layer_idx >= self.layer_cutoff:
                 return context_keys, context_values
 
+            prompt_positions = tuple( x[:, :, context_len:, :] for x in kwargs["position_embeddings"] )
+
             scores = self._get_attention_scores(
                 module,
-                hidden_states[:, context_len:, :],
-                context_keys,
-                {
-                    **kwargs,
-                    "position_embeddings": (
-                        kwargs["position_embeddings"][0][:, context_len:],
-                        kwargs["position_embeddings"][1][:, context_len:],
-                    ),
-                },
-            )
+                hidden_states[:, context_len:, :],      # [B, P, d]
+                context_keys,                           # [B, kv_heads, C, d_head]
+                prompt_positions,                       # 2 x [3, B, P, d_head]
+            ) # [B, kv_heads, C]
 
             return self._select_tokens(
                 context_keys, context_values, scores
             )
 
         elif self.prompt_type == "query":
-
             # Cache contains compressed/uncompressed context || query.
-            context_len = keys.shape[2] - q_len
+            context_len = keys.shape[2] - q_len   # N - P         | N = C + P
 
             if context_len <= 0:
                 raise ValueError(
                     "Query compression requires a non-empty cached context."
                 )
 
-            context_keys = keys[:, :, :context_len]
-            context_values = values[:, :, :context_len]
+            context_keys = keys[:, :, :-q_len, :]       # [B, kv_heads, C', d_head]
+            context_values = values[:, :, :-q_len, :]   # [B, kv_heads, C', d_head]
 
-            query_keys = keys[:, :, context_len:]
-            query_values = values[:, :, context_len:]
+            query_keys = keys[:, :, -q_len:, :]         # [B, kv_heads, P, d_head]
+            query_values = values[:, :, -q_len:, :]     # [B, kv_heads, P, d_head]
 
             # The first layers were already compressed using guidance.
             if layer_idx < self.layer_cutoff:
                 return keys, values
 
+            prompt_positions = tuple( x[:, :, -q_len:, :] for x in kwargs["position_embeddings"] )
             scores = self._get_attention_scores(
                 module,
-                hidden_states,
+                hidden_states[:, -q_len:, :],
                 context_keys,
-                kwargs,
+                prompt_positions,
             )
 
             compressed_keys, compressed_values = self._select_tokens(
@@ -252,53 +233,46 @@ class GuidancePress(BasePress):
             f"Unknown prompt_type: {self.prompt_type}"
         )
 
-    # ---------------------------------------------------------
-    # Custom forward hook
-    # ---------------------------------------------------------
 
     def forward_hook(
         self,
-        module: nn.Module,
-        input,
-        kwargs: dict,
-        output,
+        module: nn.Module,      # Qwen2_5OmniAttention [Q, K, V, O projection + rotary_emb]
+        input,                  # empty
+        kwargs: dict,           # ['hidden_states', 'attention_mask', 'position_ids', 'past_key_values', 'output_attentions', 'use_cache', 'cache_position', 'position_embeddings']
+        output,                 # tuple<tensor[[B, N (5069), 2048]], NoneType>  (hidden states output, attentions)
     ):
-        hidden_states = kwargs["hidden_states"]
-        cache = kwargs["past_key_values"]
+        from transformers import DynamicCache
+
+        # hidden_states torch.Size([1, 5069, 2048])
+        # attention_mask <class 'NoneType'>
+        # position_ids <class 'NoneType'>
+        # past_key_values <class 'transformers.cache_utils.DynamicCache'>
+        # output_attentions <class 'bool'>
+        # use_cache <class 'bool'>
+        # cache_position torch.Size([5069])
+        # position_embeddings <class 'tuple'>
+
+        hidden_states: torch.Tensor = kwargs["hidden_states"]   # [B, N, d]     d = H * d_head
+        cache: DynamicCache = kwargs["past_key_values"]
 
         if cache is None:
-            raise ValueError(
-                "GuidancePress requires a mutable KV cache."
-            )
-
-        q_len = hidden_states.shape[1]
-        prefilling = is_prefilling(
-            kwargs["cache_position"], q_len
-        )
-
-        if self.prompt_type == "guidance" and not prefilling:
-            return output
-
-        if self.prompt_type == "query" and prefilling:
-            raise ValueError(
-                "Query mode requires a pre-existing guidance cache. "
-                "Pass the context cache and query tokens together."
-            )
+            raise ValueError("GuidancePress requires a mutable KV cache.")
 
         layer_idx = module.layer_idx
 
-        keys = cache.layers[layer_idx].keys
-        values = cache.layers[layer_idx].values
+        keys: torch.Tensor = cache.layers[layer_idx].keys       # [B, kv_heads, N, d_head]
+        values: torch.Tensor = cache.layers[layer_idx].values   # [B, kv_heads, N, d_head]
 
-        if keys is None or values is None:
-            raise ValueError("KV cache is empty.")
+
+        if (keys is None or values is None) and self.prompt_type == "query" : 
+            raise ValueError("KV cache is empty. Need to prefill with guidance prompt before query")
 
         keys, values = self.compress(
             module,
             hidden_states,
             keys,
             values,
-            output[1],
+            output[1],  # attentions
             kwargs,
         )
 

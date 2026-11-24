@@ -3,18 +3,31 @@ from typing import Any
 from transformers import DynamicCache, Qwen2_5OmniProcessor, Qwen2_5OmniForConditionalGeneration
 from src.models.model_adapter import ModelAdapter
 from src.config_types.model import ModelConfig
-from src.models.qwen_25_omni.generation import media_encoder, prefill_validate_inputs
-from src.models.shared_logic.load_model import load_model
 from src.models.shared_logic.generation import GenerationState, get_eos_token_ids, move_inputs_to_device
 from src.utils.logger import logger
 from pathlib import Path
 import src.models.shared_logic.qkv_extraction as qk_extraction 
 from src.utils.utils import join_attentions
 
-from src.models.qwen_25_omni.thinker import forward as thinker_forward
-from types import MethodType
-
+from qwen_omni_utils import process_mm_info
 from datetime import datetime
+
+from dataclasses import dataclass
+
+@dataclass
+class Video:
+    path: str
+    fps: float = 1.0
+    use_audio: bool = False
+
+@dataclass
+class Message:
+    audio_path: str = None
+    image_path : str = None
+    video: Video = None
+    text: str = None
+
+
 
 class QwenOmniAdapter(ModelAdapter):
 
@@ -55,48 +68,74 @@ class QwenOmniAdapter(ModelAdapter):
         ]
 
 
+    def build_messages(self, user_input: Message | list[Message], keep_system_message: bool = True) :
+        if type(user_input) == Message :
+            user_input = [user_input]
+
+        messages: list[dict] = []
+
+        for message in user_input :
+            content = []
+            if message.image_path is not None :
+                content.append({"type": "image", "image": message.image_path})
+            if message.audio_path is not None :
+                content.append({"type": "audio", "audio": message.audio_path})
+            if message.video is not None :
+                content.append({"type": "video", "video": message.video.path, "fps": message.video.fps})
+            if message.text is not None :
+                content.append({"type": "text", "text": message.text})
+
+            messages.append({
+                "role": "user", 
+                "content": content
+            })
+
+        text = self.hf_processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+
+        if not keep_system_message :
+            index = text.find("<|im_start|>user")
+            text = text[index:]
+
+        return messages, text
+
+
     def prepare_inputs(
         self, 
-        entry: dict, 
-        use_audio: bool = True, 
-        use_image: bool = True, 
-        use_video: bool = True, 
-        use_audio_in_video: bool = True, 
-        use_text: bool = True,
-        encoder_text: str = None,
-        remove_system_message: bool = False
+        messages: list[dict],
+        input_text: str,
+        use_audio_in_video: bool = False, 
+        position_offset: int = 0
     ) :
-        # build messages
-        content = []
-        if "audio_path" in entry and use_audio:
-            content.append({"type": "audio", "audio": entry["audio_path"]})
-        if "image_path" in entry and use_image:
-            content.append({"type": "image", "image": entry["image_path"]})
-        if "video_path" in entry and use_video:
-            content.append({"type": "video", "video": entry["video_path"], "fps": 1})
-        if "text" in entry and use_text:
-            content.append({"type": "text", "text": entry["text"]})
 
-        if len(content) == 0 :
-            raise ValueError("no content provided. what now?")
+        audios, images, videos = process_mm_info(
+            messages,
+            use_audio_in_video=use_audio_in_video,
+        )
 
-        messages = [{
-            "role": "user", 
-            "content": content
-        }]
+        inputs: dict = self.hf_processor(
+            text=[input_text],
+            audio=audios,
+            images=images,
+            videos=videos,
+            return_tensors="pt",
+            padding=False,
+            use_audio_in_video=use_audio_in_video,
+        )
 
-        logger.info("messages:")
-        logger.info(str(messages))
-
-        audio_in_video = "video_path" in entry and use_video and use_audio_in_video
-        inputs = media_encoder(self.hf_processor, messages, encoder_text, audio_in_video, remove_system_message)
         position_ids, rope_deltas = self.hf_model.thinker.get_rope_index(
             input_ids=inputs["input_ids"],
-            video_grid_thw=inputs["video_grid_thw"],
+            video_grid_thw=inputs.get("video_grid_thw", None),
             attention_mask=inputs["attention_mask"],
-            second_per_grids=inputs["video_second_per_grid"]     
+            second_per_grids=inputs.get("video_second_per_grid", None) 
         )
+        position_ids = position_ids + position_offset
         inputs["position_ids"] = position_ids
+
+
         return inputs
 
 
@@ -115,9 +154,6 @@ class QwenOmniAdapter(ModelAdapter):
     ) -> GenerationState:
         model_kwargs = dict(model_kwargs or {})
         inputs = move_inputs_to_device(inputs, self.device)
-        input_ids: torch.Tensor = inputs["input_ids"]
-
-        prefill_validate_inputs(input_ids, model_kwargs)
         
         if state is None:
             state = GenerationState(
