@@ -42,6 +42,7 @@ def load_model() :
 
 from src.press.guidance_press import GuidancePress
 from src.models.shared_logic.generation import move_inputs_to_device
+import kvpress
 
 press = GuidancePress(
     compression_ratio=0.5,
@@ -51,6 +52,7 @@ press = GuidancePress(
 )
 
 model = load_model()
+# model.hf_model.thinker.model.forward
 dataset = load_MVBench()
 entry = dataset[0]
 
@@ -77,6 +79,7 @@ guidance_inputs = move_inputs_to_device(guidance_inputs, model.device)
 # build query inputs
 messages, text = model.build_messages(Message(text=entry["text"]), keep_system_message=False)
 query_inputs = model.prepare_inputs(messages, text, position_offset=offset)
+query_inputs = move_inputs_to_device(query_inputs, model.device)
 
 initial_input = {
     "input_ids": torch.cat([context_inputs["input_ids"], guidance_inputs["input_ids"]], dim=-1),
@@ -100,34 +103,44 @@ with torch.inference_mode():
             return_dict=True,
         )
 
-    cache1 = outputs.past_key_values
+    cache1: DynamicCache = outputs.past_key_values
 
 del outputs
 
 
-# press.prompt_type = "query"
-# press.prompt_len = query_inputs["input_ids"].shape[-1]
+press.prompt_type = "query"
+press.prompt_len = query_inputs["input_ids"].shape[-1]
 
-# generation_kwargs = query_inputs | {
-#     # "use_cache": True, ?
-#     "past_key_values": cache1,
-#     "use_cache": True,
-#     "return_audio": False,
-#     # "max_new_tokens": 128,
-#     # "do_sample": False,
-# }
+cache_position = torch.arange(
+    0,
+    query_inputs["input_ids"].shape[1], 
+    device=query_inputs["input_ids"].device, 
+    dtype=torch.long
+) + cache1.get_seq_length(20)
 
-# with torch.inference_mode():
-#     with press(hf_model):
-#         generated_ids = hf_model.generate(**generation_kwargs)
+generation_kwargs = query_inputs | {
+    "use_cache": True,
+    "past_key_values": cache1,
+    "use_cache": True,
+    "return_audio": False,
+    "cache_position": cache_position,
+    # "max_new_tokens": 128,
+    # "do_sample": False,
+}
 
-# answer_ids = generated_ids[:, query_inputs["input_ids"].shape[-1]:]
-# answer = model.hf_processor.batch_decode(
-#     answer_ids,
-#     skip_special_tokens=True,
-# )[0]
+# torch.nn.functional.scaled_dot_product_attention
 
-# print("Question:", entry["text"])
-# print("Answer:", answer)
+with torch.inference_mode():
+    with press(hf_model.thinker):
+        generated_ids = hf_model.generate(**generation_kwargs)
+
+answer_ids = generated_ids[:, query_inputs["input_ids"].shape[-1]:]
+answer = model.hf_processor.batch_decode(
+    answer_ids,
+    skip_special_tokens=True,
+)[0]
+
+print("Question:", entry["text"])
+print("Answer:", answer)
 
 

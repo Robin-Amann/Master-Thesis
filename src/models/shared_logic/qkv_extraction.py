@@ -38,12 +38,7 @@ def register_hooks(layers: nn.ModuleList) :
                     captured[idx]["sin"].append(sin.detach().cpu())
             return hook
 
-        handles.append(
-            attn.register_forward_pre_hook(
-                make_attn_pre_hook(layer_idx),
-                with_kwargs=True
-            )
-        )
+        handles.append(attn.register_forward_pre_hook(make_attn_pre_hook(layer_idx), with_kwargs=True))
 
     return captured, handles
 
