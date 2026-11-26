@@ -9,6 +9,8 @@ from kvpress.presses.base_press import BasePress, is_prefilling
 from kvpress.utils import compute_n_kept
 from transformers.models.qwen2_5_omni.modeling_qwen2_5_omni import apply_multimodal_rotary_pos_emb
 from transformers import DynamicCache
+from kvpress.utils import extract_keys_and_values
+
 
 @dataclass
 class GuidancePress(BasePress):
@@ -191,23 +193,48 @@ class GuidancePress(BasePress):
 
         hidden_states: torch.Tensor = kwargs["hidden_states"]   # [B, N, d]     d = H * d_head
         cache: DynamicCache = kwargs["past_key_values"]
+        cache_layer = cache.layers[module.layer_idx]
+        q_len = hidden_states.shape[1]
 
         if cache is None:
             raise ValueError("GuidancePress requires a mutable KV cache.")
 
-        layer_idx = module.layer_idx
+        # Don't compress after pre-filling
+        # if module.layer_idx == 0 or module.layer_idx == 20 : 
+        #     print(module.layer_idx, "kwargs[cache_position]", kwargs["cache_position"])
+        #     print(module.layer_idx, "q_len", q_len)
+        if not is_prefilling(kwargs["cache_position"], q_len):  # not (cache_position[-1] + 1 == q_len)
+            return output
 
-        keys: torch.Tensor = cache.layers[layer_idx].keys       # [B, kv_heads, N, d_head]
-        values: torch.Tensor = cache.layers[layer_idx].values   # [B, kv_heads, N, d_head]
+        keys, values = extract_keys_and_values(cache, module.layer_idx)
+        # same thing really
+        # keys: torch.Tensor = cache_layer.keys       # [B, kv_heads, N, d_head]
+        # values: torch.Tensor = cache_layer.values   # [B, kv_heads, N, d_head]
 
 
         if (keys is None or values is None) and self.prompt_type == "query" : 
             raise ValueError("KV cache is empty. Need to prefill with guidance prompt before query")
 
+        # print("compress layer", module.layer_idx)
+        if module.layer_idx == 0 or module.layer_idx == 20 :
+            print(module.layer_idx, keys.shape)
         keys, values = self.compress(module, hidden_states, keys, values, output[1], kwargs)
+        if module.layer_idx == 0 or module.layer_idx == 20 :
+                print("-", keys.shape)
+        # this does the base press forward hook
+        # if isinstance(cache, QuantizedCache):
+        #     cache_layer._quantized_keys = cache_layer._quantize(keys, axis=cache_layer.axis_key)
+        #     cache_layer._quantized_values = cache_layer._quantize(values, axis=cache_layer.axis_value)
+        #     cache_layer.keys = torch.zeros(0, dtype=keys.dtype, device=keys.device)  # type: ignore[index]
+        #     cache_layer.values = torch.zeros(0, dtype=keys.dtype, device=keys.device)  # type: ignore[index]
+        #     cache_layer.cumulative_length = keys.shape[2]
+        # else:
+        #     cache_layer.keys = keys
+        #     cache_layer.values = values
 
         # Update the cache in-place.
-        cache.layers[layer_idx].keys = keys
-        cache.layers[layer_idx].values = values
+        cache_layer.keys = keys
+        cache_layer.values = values
 
         return output
+

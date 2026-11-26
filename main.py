@@ -45,7 +45,7 @@ from src.models.shared_logic.generation import move_inputs_to_device
 import kvpress
 
 press = GuidancePress(
-    compression_ratio=0.5,
+    compression_ratio=0,
     prompt_type="guidance",
     prompt_len=0,
     layer_cutoff=8,
@@ -58,6 +58,7 @@ entry = dataset[0]
 
 # guild context inputs
 messages, text = model.build_messages(Message(video=Video(path=entry["video_path"])))
+print(text)
 context_inputs = model.prepare_inputs(messages, text)
 context_inputs = move_inputs_to_device(context_inputs, model.device)
 
@@ -78,9 +79,11 @@ guidance_inputs = move_inputs_to_device(guidance_inputs, model.device)
 
 # build query inputs
 messages, text = model.build_messages(Message(text=entry["text"]), keep_system_message=False)
+print(text)
 query_inputs = model.prepare_inputs(messages, text, position_offset=offset)
 query_inputs = move_inputs_to_device(query_inputs, model.device)
 
+print(context_inputs["input_ids"].shape, guidance_inputs["input_ids"].shape)
 initial_input = {
     "input_ids": torch.cat([context_inputs["input_ids"], guidance_inputs["input_ids"]], dim=-1),
     "attention_mask": torch.cat([context_inputs["attention_mask"], guidance_inputs["attention_mask"]], dim=-1),
@@ -95,6 +98,8 @@ hf_model: Qwen2_5OmniForConditionalGeneration = model.hf_model
 press.prompt_type = "guidance"
 press.prompt_len = guidance_inputs["input_ids"].shape[-1]
 
+print(initial_input["input_ids"].shape)
+print("prefill")
 with torch.inference_mode():
     with press(hf_model.thinker):
         outputs = hf_model.thinker(
@@ -116,20 +121,20 @@ cache_position = torch.arange(
     query_inputs["input_ids"].shape[1], 
     device=query_inputs["input_ids"].device, 
     dtype=torch.long
-) + cache1.get_seq_length(20)
+)
 
+print(cache_position)
+print(cache1.get_seq_length())
 generation_kwargs = query_inputs | {
     "use_cache": True,
     "past_key_values": cache1,
-    "use_cache": True,
     "return_audio": False,
     "cache_position": cache_position,
     # "max_new_tokens": 128,
     # "do_sample": False,
 }
 
-# torch.nn.functional.scaled_dot_product_attention
-
+print("generate")
 with torch.inference_mode():
     with press(hf_model.thinker):
         generated_ids = hf_model.generate(**generation_kwargs)

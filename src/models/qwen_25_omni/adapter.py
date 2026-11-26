@@ -8,6 +8,8 @@ from src.utils.logger import logger
 from pathlib import Path
 import src.models.shared_logic.qkv_extraction as qk_extraction 
 from src.utils.utils import join_attentions
+from src.models.qwen_25_omni.thinker import forward as thinker_forward
+from types import MethodType
 
 from qwen_omni_utils import process_mm_info
 from datetime import datetime
@@ -41,7 +43,7 @@ class QwenOmniAdapter(ModelAdapter):
             **(model_kwargs or {})
         )
 
-        # model.thinker.model.forward = MethodType(thinker_forward, model.thinker.model)
+        model.thinker.model.forward = MethodType(thinker_forward, model.thinker.model)
         model.eval()
         model = model.to(torch.device(config.device))
 
